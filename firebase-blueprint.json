@@ -1,0 +1,136 @@
+{
+  "entities": {
+    "UserPreferences": {
+      "title": "UserPreferences",
+      "description": "User preferences and system configuration",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Unique identifier of the user"
+        },
+        "language": {
+          "type": "string",
+          "enum": ["ar", "en"],
+          "description": "UI display language"
+        },
+        "theme": {
+          "type": "string",
+          "enum": ["dark", "light", "automotive-night"],
+          "description": "UI styling theme"
+        },
+        "units": {
+          "type": "string",
+          "enum": ["metric", "imperial"],
+          "description": "OBD units system"
+        },
+        "transportType": {
+          "type": "string",
+          "enum": ["WIFI_TCP", "BLUETOOTH_SPP"],
+          "description": "Target interface transport type"
+        },
+        "ip": {
+          "type": "string",
+          "description": "IP Address of the ESP32 Wi-Fi module"
+        },
+        "port": {
+          "type": "integer",
+          "description": "TCP Port of the ESP32 Wi-Fi module"
+        },
+        "bluetoothDeviceName": {
+          "type": "string",
+          "description": "Name of the Bluetooth target device"
+        },
+        "bluetoothMacAddress": {
+          "type": "string",
+          "description": "MAC address of the Bluetooth device"
+        },
+        "canSpeed": {
+          "type": "string",
+          "enum": ["125K", "250K", "500K", "1M"],
+          "description": "CAN Bus communication baud rate"
+        },
+        "canMode": {
+          "type": "string",
+          "enum": ["11-bit", "29-bit"],
+          "description": "CAN Identifier structure"
+        },
+        "isMockMode": {
+          "type": "boolean",
+          "description": "Toggle between actual simulation and real hardware"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when configuration was modified"
+        }
+      },
+      "required": ["userId", "language", "theme", "units", "transportType"]
+    },
+    "DiagnosticReport": {
+      "title": "DiagnosticReport",
+      "description": "Automotive diagnostic reports containing DTCs and vehicle information",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for this diagnostic record"
+        },
+        "userId": {
+          "type": "string",
+          "description": "User who ran the diagnostic session"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Session timestamp"
+        },
+        "rawVin": {
+          "type": "string",
+          "maxLength": 17,
+          "pattern": "^[A-HJ-NPR-Z0-9]{17}$",
+          "description": "Vehicle Identification Number"
+        },
+        "manufacturer": {
+          "type": "string",
+          "description": "Detected vehicle manufacturer"
+        },
+        "model": {
+          "type": "string",
+          "description": "Detected vehicle model"
+        },
+        "year": {
+          "type": "integer",
+          "description": "Detected vehicle production year"
+        },
+        "country": {
+          "type": "string",
+          "description": "Detected vehicle country of origin"
+        },
+        "batteryVoltage": {
+          "type": "number",
+          "description": "Vehicle battery voltage measured during scan"
+        },
+        "dtcCodes": {
+          "type": "array",
+          "description": "Scanned trouble codes (array of strings)"
+        },
+        "status": {
+          "type": "string",
+          "description": "Status of the scan (e.g. Completed, Incomplete)"
+        }
+      },
+      "required": ["id", "userId", "timestamp", "rawVin", "dtcCodes"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/preferences/settings": {
+      "schema": "UserPreferences",
+      "description": "User specific app settings and OBD configurations"
+    },
+    "/users/{userId}/diagnosticHistory/{reportId}": {
+      "schema": "DiagnosticReport",
+      "description": "User diagnostics reports with scanned vehicle DTCs and history"
+    }
+  }
+}

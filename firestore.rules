@@ -1,0 +1,96 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Global Safety Net (First Rule - Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Primitives & Core Identity Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Validation Blueprint for UserPreferences Entity
+    function isValidUserPreferences(data) {
+      return data.keys().hasAll(['userId', 'language', 'theme', 'units', 'transportType']) 
+        && data.keys().size() <= 13
+        && data.userId == request.auth.uid
+        && data.language in ['ar', 'en']
+        && data.theme in ['dark', 'light', 'automotive-night']
+        && data.units in ['metric', 'imperial']
+        && data.transportType in ['WIFI_TCP', 'BLUETOOTH_SPP']
+        && (!('ip' in data) || (data.ip is string && data.ip.size() <= 100))
+        && (!('port' in data) || (data.port is int))
+        && (!('bluetoothDeviceName' in data) || (data.bluetoothDeviceName is string && data.bluetoothDeviceName.size() <= 200))
+        && (!('bluetoothMacAddress' in data) || (data.bluetoothMacAddress is string && data.bluetoothMacAddress.size() <= 100))
+        && (!('canSpeed' in data) || (data.canSpeed in ['125K', '250K', '500K', '1M']))
+        && (!('canMode' in data) || (data.canMode in ['11-bit', '29-bit']))
+        && (!('isMockMode' in data) || (data.isMockMode is bool));
+    }
+
+    // Validation Blueprint for DiagnosticReport Entity
+    function isValidDiagnosticReport(data) {
+      return data.keys().hasAll(['id', 'userId', 'timestamp', 'rawVin', 'dtcCodes'])
+        && data.keys().size() <= 11
+        && data.id is string && data.id.size() <= 128
+        && data.userId == request.auth.uid
+        && data.rawVin is string && data.rawVin.size() <= 17 && data.rawVin.matches('^[A-HJ-NPR-Z0-9]{17}$')
+        && data.dtcCodes is list
+        && data.dtcCodes.size() <= 100
+        && (data.dtcCodes.size() == 0 || data.dtcCodes[0] is string)
+        && (!('manufacturer' in data) || (data.manufacturer is string && data.manufacturer.size() <= 100))
+        && (!('model' in data) || (data.model is string && data.model.size() <= 100))
+        && (!('year' in data) || (data.year is int))
+        && (!('country' in data) || (data.country is string && data.country.size() <= 100))
+        && (!('batteryVoltage' in data) || (data.batteryVoltage is number))
+        && (!('status' in data) || (data.status is string && data.status.size() <= 50));
+    }
+
+    // Users Collection and Sub-resources Routing
+    match /users/{userId} {
+      allow read, write: if false;
+
+      // Preferences Subcollection Settings Document
+      match /preferences/settings {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) 
+          && isVerified() 
+          && isValidId(userId)
+          && isValidUserPreferences(request.resource.data)
+          && request.resource.data.updatedAt == request.time;
+        allow update: if isOwner(userId)
+          && isVerified()
+          && isValidId(userId)
+          && isValidUserPreferences(request.resource.data)
+          && request.resource.data.updatedAt == request.time;
+      }
+
+      // Diagnostic Scan History Subcollection
+      match /diagnosticHistory/{reportId} {
+        allow list, get: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && isVerified()
+          && isValidId(userId)
+          && isValidId(reportId)
+          && isValidDiagnosticReport(request.resource.data)
+          && request.resource.data.timestamp == request.time;
+        allow update: if false; // Diagnostic reports are terminal and immutable!
+        allow delete: if isOwner(userId);
+      }
+    }
+  }
+}
