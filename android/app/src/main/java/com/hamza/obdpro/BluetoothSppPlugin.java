@@ -57,6 +57,7 @@ public class BluetoothSppPlugin extends Plugin {
         bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
     }
 
+    // Check for Android 12+ Bluetooth Connect Permission
     private boolean hasBluetoothConnectPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             return ActivityCompat.checkSelfPermission(getContext(), Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED;
