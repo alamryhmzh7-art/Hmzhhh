@@ -349,6 +349,9 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
                           }
                         } catch (err) {
                           console.warn('Web Bluetooth selection cancelled/failed:', err);
+                          if ((err as any)?.message?.includes('permissions policy')) {
+                            alert("Bluetooth access is restricted in this embedded preview frame. Please click the 'Open in New Tab' icon (top right) to scan for real Bluetooth devices.");
+                          }
                         }
                       }}
                       className="px-2.5 py-1 rounded-lg bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 border border-indigo-500/40 text-xs font-semibold flex items-center gap-1.5 transition-all"

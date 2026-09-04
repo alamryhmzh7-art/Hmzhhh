@@ -118,7 +118,7 @@ export class BluetoothSppTransport implements ITransport {
              });
            }
          } catch (err: any) {
-           console.error('[BT-WEB] Web Bluetooth error or user cancelled:', err);
+           console.warn('[BT-WEB] Web Bluetooth error or user cancelled:', err?.message || err);
            if (err?.message?.includes('permissions policy')) {
              alert("Bluetooth access is restricted in this embedded preview frame. Please click the 'Open in New Tab' icon (top right) to scan for real Bluetooth devices.");
            }
