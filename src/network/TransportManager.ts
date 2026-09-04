@@ -59,11 +59,15 @@ export class TransportManager {
       const frameIdNum = parseInt(frame.id.replace('0x', ''), 16);
       for (const seq in this.pendingRequests) {
         const req = this.pendingRequests[seq];
-        // Very basic CAN ID matching (assuming standard 11-bit OBD response IDs: 0x7E8 to 0x7EF)
-        if (frameIdNum >= 0x7E8 && frameIdNum <= 0x7EF) {
+        const expectedResponseId = req.canId + 8;
+        const isMatch = (req.canId === 0x7DF && frameIdNum >= 0x7E8 && frameIdNum <= 0x7EF) ||
+                        (frameIdNum === expectedResponseId) ||
+                        (frameIdNum >= 0x7E8 && frameIdNum <= 0x7EF);
+        if (isMatch) {
            clearTimeout(req.timer);
            req.resolve(frame.dataBytes);
            delete this.pendingRequests[seq];
+           break;
         }
       }
     };

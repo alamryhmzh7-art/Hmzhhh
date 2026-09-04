@@ -176,17 +176,18 @@ export class BluetoothSppTransport implements ITransport {
         throw new Error('TARGET_NOT_PAIRED: Target device MAC not found in bonded devices.');
       }
 
-      // Register listener BEFORE starting connection/read thread to prevent losing first packet
-      await this.startNativeBtReadLoop();
-
       console.log(`[BT-NATIVE] Proceeding with RFCOMM connection to ${targetMac}`);
       console.log(`[BT-NATIVE] RFCOMM CONNECT START`);
       console.log(`[BT-NATIVE] SPP UUID: 00001101-0000-1000-8000-00805F9B34FB`);
 
+      // 1. Establish RFCOMM connection first
       await BluetoothSpp.connect({ address: targetMac });
+      console.log('[BT-NATIVE] RFCOMM CONNECT SUCCESS');
+
+      // 2. Start/register data reception read loop only after successful connection
+      await this.startNativeBtReadLoop();
 
       this.rawState = 'CONNECTED';
-      console.log('[BT-NATIVE] RFCOMM CONNECT SUCCESS');
       console.log('[BT-NATIVE] STREAMS OPEN');
       this.setStatus('CONNECTED');
       this.isConnecting = false;
