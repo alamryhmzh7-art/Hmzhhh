@@ -144,8 +144,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         });
         setPreferences(defaultPrefs);
       }
-    } catch (error) {
-      handleFirestoreError(error, OperationType.GET, path);
+    } catch (error: any) {
+      if (error?.message?.includes('offline') || error?.code === 'unavailable') {
+        console.warn('[Offline Mode] Unable to reach Firestore. Loading default settings.');
+        setPreferences({
+          userId: uid,
+          language: 'ar',
+          theme: 'dark',
+          units: 'metric',
+          transportType: 'BLUETOOTH_SPP',
+          ip: '192.168.4.1',
+          port: 35000,
+          bluetoothDeviceName: 'ESP32-OBD-PRO',
+          bluetoothMacAddress: '00:11:22:33:44:55',
+          canSpeed: '500K',
+          canMode: '11-bit',
+          isMockMode: false,
+        });
+      } else {
+        handleFirestoreError(error, OperationType.GET, path);
+      }
     }
   };
 
@@ -192,8 +210,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return timeB - timeA;
       });
       setDiagnosticHistory(history);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.LIST, path);
+    } catch (error: any) {
+      if (error?.message?.includes('offline') || error?.code === 'unavailable') {
+        console.warn('[Offline Mode] Unable to reach Firestore. Loading empty history.');
+        setDiagnosticHistory([]);
+      } else {
+        handleFirestoreError(error, OperationType.LIST, path);
+      }
     }
   };
 

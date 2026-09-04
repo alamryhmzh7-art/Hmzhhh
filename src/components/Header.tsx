@@ -47,7 +47,6 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenConnectionManager
 }) => {
   const { language, setLanguage, isRtl, t } = useI18n();
-  const { user, signInWithGoogle, signOut } = useAuth();
 
   const handleConnectToggle = () => {
     if (onToggleConnect) {
@@ -132,24 +131,12 @@ export const Header: React.FC<HeaderProps> = ({
                 {isBluetooth ? (language === 'ar' ? 'بلوتوث' : 'BT') : (language === 'ar' ? 'واي فاي' : 'Wi-Fi')}:
               </span>
               <span className="text-slate-100 font-extrabold truncate max-w-[120px]">
-                {isBluetooth ? (config.bluetoothDeviceName || 'ESP32') : (config.ip || '192.168.0.10')}
+                {status === 'CONNECTED' || status === 'CONNECTING'
+                  ? (isBluetooth ? (config.bluetoothDeviceName || 'OBD Device') : (config.ip || '192.168.0.10'))
+                  : (language === 'ar' ? 'غير متصل' : 'Not Connected')}
               </span>
             </span>
             <Settings2 className="h-3 w-3 text-slate-400" />
-          </button>
-
-          {/* Mode Switcher Pill */}
-          <button
-            onClick={handleMockToggle}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all border ${
-              config.isMockMode
-                ? 'bg-amber-500/15 border-amber-500/40 text-amber-300 hover:bg-amber-500/25'
-                : 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25'
-            }`}
-            title="تبديل بين الوضع الحقيقي مع ESP32 ووضع المحاكاة"
-          >
-            <Cpu className="h-3.5 w-3.5" />
-            <span>{config.isMockMode ? t('mockMode') : t('realMode')}</span>
           </button>
 
           {/* Connection Status Pill */}
@@ -191,50 +178,6 @@ export const Header: React.FC<HeaderProps> = ({
             <Languages className="h-3.5 w-3.5" />
             <span>{language === 'ar' ? 'English (EN)' : 'العربية (AR)'}</span>
           </button>
-
-          {/* Firebase Authentication */}
-          {user ? (
-            <div className="flex items-center gap-2 bg-slate-800 border border-slate-700 rounded-lg p-1 pr-2.5 shadow-md">
-              {user.photoURL ? (
-                <img 
-                  src={user.photoURL} 
-                  alt={user.displayName || 'User'} 
-                  referrerPolicy="no-referrer"
-                  className="w-6 h-6 rounded-full border border-cyan-500/50"
-                  id="user-profile-img"
-                />
-              ) : (
-                <div className="w-6 h-6 rounded-full bg-slate-700 flex items-center justify-center border border-cyan-500/50" id="user-profile-avatar">
-                  <UserIcon className="h-3.5 w-3.5 text-cyan-400" />
-                </div>
-              )}
-              <div className="hidden sm:flex flex-col text-left">
-                <span className="text-[9px] font-bold text-slate-200 truncate max-w-[90px] leading-tight">
-                  {user.displayName || 'User'}
-                </span>
-                <span className="text-[7px] text-slate-400 truncate max-w-[90px] leading-none">
-                  {user.email || ''}
-                </span>
-              </div>
-              <button
-                onClick={() => signOut()}
-                className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-rose-400 transition-colors"
-                title={language === 'ar' ? 'تسجيل الخروج' : 'Sign Out'}
-                id="btn-sign-out"
-              >
-                <LogOut className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          ) : (
-            <button
-              onClick={() => signInWithGoogle()}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white shadow-md transition-all shadow-cyan-950/40"
-              id="btn-sign-in"
-            >
-              <LogIn className="h-3.5 w-3.5" />
-              <span>{language === 'ar' ? 'تسجيل الدخول' : 'Sign In'}</span>
-            </button>
-          )}
         </div>
       </div>
     </header>

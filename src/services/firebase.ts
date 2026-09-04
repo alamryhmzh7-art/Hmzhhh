@@ -1,16 +1,10 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
-import { initializeFirestore } from 'firebase/firestore';
+import { getFirestore } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 const app = initializeApp(firebaseConfig);
-// Note the critical custom databaseId required for Firestore Enterprise
-// We also enforce experimentalForceLongPolling to bypass restrictive proxy/WebSocket rules in sandboxed iframes
-export const db = initializeFirestore(
-  app,
-  { experimentalForceLongPolling: true },
-  firebaseConfig.firestoreDatabaseId
-);
+export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth();
 
 export enum OperationType {

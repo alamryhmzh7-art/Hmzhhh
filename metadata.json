@@ -1,6 +1,8 @@
 {
   "name": "HAMZA OBD PRO",
   "description": "منصة احترافية متكاملة لتشخيص أعطال السيارات وقراءة البيانات الحية عبر أجهزة ESP32 OBD مع دعم كامل للعربية وRTL",
-  "requestFramePermissions": [],
+  "requestFramePermissions": [
+    "bluetooth"
+  ],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
