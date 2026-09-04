@@ -60,9 +60,9 @@ export class TransportManager {
       for (const seq in this.pendingRequests) {
         const req = this.pendingRequests[seq];
         const expectedResponseId = req.canId + 8;
+        // Strict matching: 0x7DF matches any ECU response 0x7E8-0x7EF; targeted IDs match exact req.canId + 8
         const isMatch = (req.canId === 0x7DF && frameIdNum >= 0x7E8 && frameIdNum <= 0x7EF) ||
-                        (frameIdNum === expectedResponseId) ||
-                        (frameIdNum >= 0x7E8 && frameIdNum <= 0x7EF);
+                        (frameIdNum === expectedResponseId);
         if (isMatch) {
            clearTimeout(req.timer);
            req.resolve(frame.dataBytes);
