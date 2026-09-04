@@ -39,6 +39,7 @@ import java.util.UUID;
         )
     }
 )
+@SuppressLint("MissingPermission")
 public class BluetoothSppPlugin extends Plugin {
 
     private static final String TAG = "HamzaBT";
@@ -79,7 +80,6 @@ public class BluetoothSppPlugin extends Plugin {
         }
 
         try {
-            @SuppressLint("MissingPermission")
             Set<BluetoothDevice> pairedDevices = bluetoothAdapter.getBondedDevices();
             
             Log.d(TAG, "[BT-NATIVE] PAIRED DEVICES COUNT: " + (pairedDevices != null ? pairedDevices.size() : 0));
@@ -88,7 +88,7 @@ public class BluetoothSppPlugin extends Plugin {
             if (pairedDevices != null) {
                 for (BluetoothDevice device : pairedDevices) {
                     JSObject devObj = new JSObject();
-                    @SuppressLint("MissingPermission") String name = device.getName();
+                    String name = device.getName();
                     String address = device.getAddress();
                     devObj.put("name", name != null ? name : "Unknown");
                     devObj.put("address", address);
@@ -132,8 +132,6 @@ public class BluetoothSppPlugin extends Plugin {
         try {
             Log.d(TAG, "[BT-NATIVE] TARGET MAC: " + address);
             
-            @SuppressLint("MissingPermission")
-            @SuppressLint("MissingPermission")
             Set<BluetoothDevice> pairedDevices = bluetoothAdapter.getBondedDevices();
             BluetoothDevice device = null;
             if (pairedDevices != null) {
@@ -154,15 +152,12 @@ public class BluetoothSppPlugin extends Plugin {
             Log.d(TAG, "[BT-NATIVE] RFCOMM CONNECT START");
             Log.d(TAG, "[BT-NATIVE] SPP UUID: " + SPP_UUID.toString());
             
-            @SuppressLint("MissingPermission")
             BluetoothSocket tmp = device.createRfcommSocketToServiceRecord(SPP_UUID);
             socket = tmp;
 
-            @SuppressLint("MissingPermission")
             boolean wasDiscovering = bluetoothAdapter.isDiscovering();
             if (wasDiscovering) {
-                @SuppressLint("MissingPermission")
-                boolean canceled = bluetoothAdapter.cancelDiscovery();
+                bluetoothAdapter.cancelDiscovery();
             }
 
             socket.connect();
