@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useI18n } from '../i18n/I18nContext';
 import { DiagnosticTroubleCode, ConnectionStatus, VinInfo } from '../types';
-import { initialDtcDatabase } from '../obd/dtcDatabase';
+import { initialDtcDatabase, DtcDecoder } from '../obd/dtcDatabase';
 import { transportManager } from '../network/TransportManager';
 import { useAuth } from '../services/AuthContext';
 import { 
@@ -77,7 +77,14 @@ export const DtcView: React.FC<DtcViewProps> = ({
       // Send Mode 03 (Request Stored DTCs) via transportManager
       const resp = await transportManager.sendRequest([0x03], '0x7E0');
       if (resp.status === 'SUCCESS' || isMockMode) {
-        const results = initialDtcDatabase.slice(0, status === 'CONNECTED' && !isMockMode ? 2 : 3);
+        let results: DiagnosticTroubleCode[] = [];
+        if (isMockMode) {
+          results = initialDtcDatabase.slice(0, 3);
+        } else if (resp.responseRaw) {
+          const bytes = resp.responseRaw.split(' ').map(b => parseInt(b, 16));
+          const dtcBytes = bytes[0] === 0x43 ? bytes.slice(2) : bytes;
+          results = DtcDecoder.parseDtcList(dtcBytes, 'CONFIRMED');
+        }
         setDtcList(results);
 
         if (user) {

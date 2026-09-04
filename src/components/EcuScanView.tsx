@@ -67,7 +67,7 @@ export const EcuScanView: React.FC<EcuScanViewProps> = ({
       // Send TesterPresent / Diagnostic Session request to address via transportManager
       try {
         const resp = await transportManager.sendRequest([0x3E, 0x00], node.txIdHex);
-        const isOnline = resp.status === 'SUCCESS' || isMockMode;
+        const isOnline = resp.status === 'SUCCESS';
 
         if (isOnline) {
           setEcuList(prev => prev.map((item, idx) => {

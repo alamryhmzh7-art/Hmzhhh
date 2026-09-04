@@ -374,12 +374,12 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
 
               {/* Devices List */}
               <div className="space-y-2 max-h-48 overflow-y-auto">
-                {discoveredDevices.length === 0 ? (
+                {(Array.isArray(discoveredDevices) ? discoveredDevices : []).length === 0 ? (
                   <div className="p-4 text-center rounded-lg bg-slate-900/40 border border-slate-800/80 text-xs text-slate-500">
                     {isRtl ? 'لم يتم العثور على أجهزة بلوتوث مقترنة. يرجى البحث أو الإدخال اليدوي أدناه.' : 'No Bluetooth devices discovered yet. Tap SCAN or use manual inputs below.'}
                   </div>
                 ) : (
-                  discoveredDevices.map((dev, idx) => {
+                  (Array.isArray(discoveredDevices) ? discoveredDevices : []).map((dev, idx) => {
                     const isSelected = btDeviceName === dev.name || btMac === dev.address;
                     return (
                       <div
