@@ -34,6 +34,7 @@ export class TCPClient {
   private listeners: ((status: ConnectionStatus) => void)[] = [];
   private sequenceId: number = 0;
   private ws: WebSocket | null = null;
+  private pendingRequests: Record<number, { resolve: (bytes: number[]) => void; reject: (err: any) => void; timer: any }> = {};
 
   constructor(config: ConnectionConfig) {
     this.config = config;
@@ -142,7 +143,6 @@ export class TCPClient {
                    req.resolve(CanManager.parseHexStringToBytes(parsed.data));
                    delete this.pendingRequests[parsed.seq];
                 } else {
-                   // Fallback: resolve the oldest pending request if seq doesn't match but we got data
                    const seqs = Object.keys(this.pendingRequests);
                    if (seqs.length > 0) {
                        const req = this.pendingRequests[parseInt(seqs[0])];
@@ -151,6 +151,8 @@ export class TCPClient {
                        delete this.pendingRequests[parseInt(seqs[0])];
                    }
                 }
+
+
               }
             }
           } catch {

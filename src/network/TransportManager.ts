@@ -62,7 +62,7 @@ export class TransportManager {
         // Very basic CAN ID matching (assuming standard 11-bit OBD response IDs: 0x7E8 to 0x7EF)
         if (frameIdNum >= 0x7E8 && frameIdNum <= 0x7EF) {
            clearTimeout(req.timer);
-           req.resolve(frame.data);
+           req.resolve(frame.dataBytes);
            delete this.pendingRequests[seq];
         }
       }
