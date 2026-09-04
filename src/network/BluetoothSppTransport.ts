@@ -152,11 +152,12 @@ export class BluetoothSppTransport implements ITransport {
       console.log(`[BT-NATIVE] RFCOMM CONNECT START`);
       console.log(`[BT-NATIVE] SPP UUID: 00001101-0000-1000-8000-00805F9B34FB`);
 
-      await this.startNativeBtReadLoop();
       await BluetoothSpp.connect({ address: targetMac });
+      console.log('[BT-NATIVE] RFCOMM CONNECT SUCCESS');
+
+      await this.startNativeBtReadLoop();
       
       this.rawState = 'CONNECTED';
-      console.log('[BT-NATIVE] RFCOMM CONNECT SUCCESS');
       this.setStatus('CONNECTED');
       this.isConnecting = false;
       return true;
