@@ -25,7 +25,7 @@ interface LiveDataViewProps {
   isMockMode?: boolean;
 }
 
-export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode = true }) => {
+export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode = false }) => {
   const { t, isRtl } = useI18n();
   const [pids, setPids] = useState<ObdPid[]>(standardPids);
   const [isStreaming, setIsStreaming] = useState<boolean>(true);

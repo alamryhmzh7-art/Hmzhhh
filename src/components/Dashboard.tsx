@@ -48,7 +48,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
     canMode: '11-bit',
     protocol: 'ISO 15765-4 (CAN 11/500)',
     autoReconnect: true,
-    isMockMode: true
+    isMockMode: false
   },
   vinInfo = {
     rawVin: '4T1BF1FK5NU123456',

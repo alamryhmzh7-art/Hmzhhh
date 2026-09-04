@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useI18n } from '../i18n/I18nContext';
 import { ServiceFunctionItem, ConnectionStatus } from '../types';
 import { SERVICE_FUNCTIONS_CATALOG } from '../services/serviceFunctions';
-import { defaultTcpClient } from '../network/TcpClient';
+import { transportManager } from '../network/TransportManager';
 import { 
   Wrench, 
   ShieldAlert, 
@@ -57,7 +57,7 @@ export const ServiceFunctionsView: React.FC<ServiceFunctionsViewProps> = ({ stat
       }));
 
       // Simulate UDS RoutineControl exchange (0x31 0x01)
-      await defaultTcpClient.sendRequest([0x31, 0x01, 0x01, i + 1], '0x7E0');
+      await transportManager.sendRequest([0x31, 0x01, 0x01, i + 1], '0x7E0');
       await new Promise(r => setTimeout(r, 1200));
     }
 

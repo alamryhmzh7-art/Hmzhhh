@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useI18n } from '../i18n/I18nContext';
 import { CanFrame, ConnectionStatus } from '../types';
 import { canManager } from '../can/canManager';
-import { defaultTcpClient } from '../network/TcpClient';
+import { transportManager } from '../network/TransportManager';
 import { 
   Radio, 
   Play, 
@@ -66,7 +66,7 @@ export const CanMonitorView: React.FC<CanMonitorViewProps> = ({ status }) => {
     };
 
     canManager.addFrame(newFrame);
-    await defaultTcpClient.sendRequest(rawBytes, sendCanId);
+    await transportManager.sendRequest(rawBytes, sendCanId);
   };
 
   const clearFrames = () => {

@@ -24,7 +24,7 @@ interface VinViewProps {
   isMockMode?: boolean;
 }
 
-export const VinView: React.FC<VinViewProps> = ({ status, vinInfo, setVinInfo, isMockMode = true }) => {
+export const VinView: React.FC<VinViewProps> = ({ status, vinInfo, setVinInfo, isMockMode = false }) => {
   const { t, isRtl } = useI18n();
   const [manualVin, setManualVin] = useState<string>(vinInfo.rawVin || '4T1BF1FK5NU123456');
   const [isReading, setIsReading] = useState<boolean>(false);
@@ -34,7 +34,12 @@ export const VinView: React.FC<VinViewProps> = ({ status, vinInfo, setVinInfo, i
     try {
       // Send Mode 09 PID 02 (VIN request) via transportManager
       const resp = await transportManager.sendRequest([0x09, 0x02], '0x7E0');
-      const vinToDecode = (resp.status === 'SUCCESS' || isMockMode) ? '4T1BF1FK5NU123456' : manualVin;
+      let vinToDecode = manualVin;
+      if (isMockMode) {
+         vinToDecode = '4T1BF1FK5NU123456';
+      } else if (resp.status === 'SUCCESS' && resp.decodedData) {
+         vinToDecode = resp.decodedData; // In a real app, this should be the decoded ASCII from the response payload
+      }
       const decoded = VinDecoder.decode(vinToDecode);
       setVinInfo(decoded);
       setManualVin(decoded.rawVin);

@@ -23,6 +23,7 @@ export class TransportManager {
   private activeTransport: ITransport;
   private statusListeners: ((status: ConnectionStatus, type: TransportType) => void)[] = [];
   private sequenceId: number = 0;
+  private pendingRequests: { [seq: number]: { resolve: (data: number[]) => void, reject: (err: Error) => void, canId: number, timer: any } } = {};
 
   constructor(initialConfig: ConnectionConfig) {
     this.config = initialConfig;
@@ -53,6 +54,21 @@ export class TransportManager {
         this.notifyStatus(state);
       }
     });
+
+    const handleCanFrame = (frame: CanFrame) => {
+      const frameIdNum = parseInt(frame.id.replace('0x', ''), 16);
+      for (const seq in this.pendingRequests) {
+        const req = this.pendingRequests[seq];
+        // Very basic CAN ID matching (assuming standard 11-bit OBD response IDs: 0x7E8 to 0x7EF)
+        if (frameIdNum >= 0x7E8 && frameIdNum <= 0x7EF) {
+           clearTimeout(req.timer);
+           req.resolve(frame.data);
+           delete this.pendingRequests[seq];
+        }
+      }
+    };
+    this.wifiTransport.onCanFrame(handleCanFrame);
+    this.btTransport.onCanFrame(handleCanFrame);
   }
 
   public subscribeStatus(listener: (status: ConnectionStatus, type: TransportType) => void): () => void {
@@ -246,7 +262,14 @@ export class TransportManager {
         const ok = await this.activeTransport.sendCanFrame(numCanId, requestBytes, isExtended);
         if (!ok) throw new Error('Failed to send packet over transport');
         // Real response is picked up via stream listeners
-        responseBytes = [0x50, 0x01];
+        const seq = this.sequenceId;
+        responseBytes = await new Promise<number[]>((resolve, reject) => {
+           const timer = setTimeout(() => {
+              delete this.pendingRequests[seq];
+              reject(new Error('TIMEOUT_WAITING_FOR_ECU_RESPONSE'));
+           }, 2500);
+           this.pendingRequests[seq] = { resolve, reject, canId: numCanId, timer };
+        });
       }
 
       const durationMs = Math.round(performance.now() - startTime);

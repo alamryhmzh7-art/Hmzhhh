@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useI18n } from '../i18n/I18nContext';
 import { ToyotaProcedure, TOYOTA_OEM_PROCEDURES } from '../vehicle/toyotaProcedures';
 import { ConnectionStatus } from '../types';
-import { defaultTcpClient } from '../network/TcpClient';
+import { transportManager } from '../network/TransportManager';
 import { 
   Car, 
   Play, 
@@ -44,7 +44,7 @@ export const ToyotaSpecialView: React.FC<ToyotaSpecialViewProps> = ({ status, ba
       const cmd = selectedProc.commandSequence[i];
       const bytes = cmd.requestHex.split(' ').map(h => parseInt(h, 16));
 
-      await defaultTcpClient.sendRequest(bytes, selectedProc.targetEcuAddrHex);
+      await transportManager.sendRequest(bytes, selectedProc.targetEcuAddrHex);
       await new Promise(r => setTimeout(r, cmd.delayMs));
     }
 

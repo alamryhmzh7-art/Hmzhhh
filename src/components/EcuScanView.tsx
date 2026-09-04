@@ -27,7 +27,7 @@ export const EcuScanView: React.FC<EcuScanViewProps> = ({
   status, 
   ecuList: propEcuList, 
   setEcuList: propSetEcuList,
-  isMockMode = true
+  isMockMode = false
 }) => {
   const { t, isRtl } = useI18n();
   const [internalEcuList, setInternalEcuList] = useState<EcuInfo[]>(() =>

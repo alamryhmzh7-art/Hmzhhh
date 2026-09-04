@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useI18n } from '../i18n/I18nContext';
 import { ConnectionStatus } from '../types';
 import { UdsService, STANDARD_UDS_SERVICES, NRC_DICTIONARY } from '../uds/udsService';
-import { defaultTcpClient } from '../network/TcpClient';
+import { transportManager } from '../network/TransportManager';
 import { 
   Cpu, 
   Send, 
@@ -51,7 +51,7 @@ export const UdsView: React.FC<UdsViewProps> = ({ status }) => {
     const reqHex = fullRequestBytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
 
     try {
-      const pkt = await defaultTcpClient.sendRequest(fullRequestBytes, targetCanId);
+      const pkt = await transportManager.sendRequest(fullRequestBytes, targetCanId);
       const resBytes = pkt.responseRaw ? pkt.responseRaw.split(' ').map(h => parseInt(h, 16)) : [];
       const isPositive = resBytes.length > 0 && resBytes[0] !== 0x7F;
 

@@ -32,7 +32,7 @@ export const DtcView: React.FC<DtcViewProps> = ({
   status, 
   dtcList, 
   setDtcList, 
-  isMockMode = true,
+  isMockMode = false,
   vinInfo,
   batteryVoltage
 }) => {
@@ -120,10 +120,15 @@ export const DtcView: React.FC<DtcViewProps> = ({
     setIsClearing(true);
     try {
       // Send Mode 04 (Clear DTCs) via transportManager
-      await transportManager.sendRequest([0x04], '0x7E0');
-      setDtcList([]);
-      setShowClearModal(false);
-      setClearSuccessMessage(isRtl ? 'تم إرسال أمر مسح الأعطال (Mode 04) وإعادة ضبط مؤشر فحص المحرك بنجاح.' : 'DTCs Cleared and Check Engine Light reset successfully (Mode 04).');
+      const resp = await transportManager.sendRequest([0x04], '0x7E0');
+      if (resp.status === 'SUCCESS') {
+        setDtcList([]);
+        setShowClearModal(false);
+        setClearSuccessMessage(isRtl ? 'تم إرسال أمر مسح الأعطال (Mode 04) وإعادة ضبط مؤشر فحص المحرك بنجاح.' : 'DTCs Cleared and Check Engine Light reset successfully (Mode 04).');
+      } else {
+        setShowClearModal(false);
+        setConnectionError(isRtl ? 'فشل مسح الأعطال: لم تستجب وحدة التحكم' : 'Clear failed: ECU did not respond (0x44)');
+      }
     } catch {
       //
     } finally {

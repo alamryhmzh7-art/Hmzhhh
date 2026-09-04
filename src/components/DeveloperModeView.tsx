@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useI18n } from '../i18n/I18nContext';
 import { ConnectionStatus } from '../types';
-import { defaultTcpClient } from '../network/TcpClient';
+import { transportManager } from '../network/TransportManager';
 import { 
   Terminal, 
   Send, 
@@ -53,7 +53,7 @@ export const DeveloperModeView: React.FC<DeveloperModeViewProps> = ({ status }) 
     // Hex payload
     const bytes = cleanCmd.split(/\s+/).map(h => parseInt(h, 16) || 0);
     try {
-      const pkt = await defaultTcpClient.sendRequest(bytes, targetCanId);
+      const pkt = await transportManager.sendRequest(bytes, targetCanId);
       setConsoleHistory(prev => [
         ...prev,
         {

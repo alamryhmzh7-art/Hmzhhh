@@ -134,6 +134,23 @@ export class TCPClient {
                   isExtended: Boolean(parsed.isExtended),
                   description: parsed.description
                 });
+
+                // Check if this fulfills a pending request
+                if (parsed.seq !== undefined && this.pendingRequests[parsed.seq]) {
+                   const req = this.pendingRequests[parsed.seq];
+                   clearTimeout(req.timer);
+                   req.resolve(CanManager.parseHexStringToBytes(parsed.data));
+                   delete this.pendingRequests[parsed.seq];
+                } else {
+                   // Fallback: resolve the oldest pending request if seq doesn't match but we got data
+                   const seqs = Object.keys(this.pendingRequests);
+                   if (seqs.length > 0) {
+                       const req = this.pendingRequests[parseInt(seqs[0])];
+                       clearTimeout(req.timer);
+                       req.resolve(CanManager.parseHexStringToBytes(parsed.data));
+                       delete this.pendingRequests[parseInt(seqs[0])];
+                   }
+                }
               }
             }
           } catch {
@@ -225,8 +242,10 @@ export class TCPClient {
         this.ws.send(payload);
 
         // Await response packet with response timeout
-        // (In full socket implementation, resolves from pending message queue)
-        responseBytes = [0x50, 0x01]; // placeholder ACK from hardware
+        responseBytes = await new Promise<number[]>((resolve, reject) => {
+           const timer = setTimeout(() => reject(new Error('TIMEOUT_WAITING_FOR_ECU_RESPONSE')), 2500);
+           this.pendingRequests[reqSeq] = { resolve, reject, timer };
+        });
       }
 
       const durationMs = Math.round(performance.now() - startTime);

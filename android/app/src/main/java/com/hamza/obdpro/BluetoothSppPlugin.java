@@ -133,8 +133,17 @@ public class BluetoothSppPlugin extends Plugin {
             Log.d(TAG, "[BT-NATIVE] TARGET MAC: " + address);
             
             @SuppressLint("MissingPermission")
-            BluetoothDevice device = bluetoothAdapter.getRemoteDevice(address);
-            
+            @SuppressLint("MissingPermission")
+            Set<BluetoothDevice> pairedDevices = bluetoothAdapter.getBondedDevices();
+            BluetoothDevice device = null;
+            if (pairedDevices != null) {
+                for (BluetoothDevice d : pairedDevices) {
+                    if (d.getAddress().equals(address)) {
+                        device = d;
+                        break;
+                    }
+                }
+            }
             if (device == null) {
                 Log.d(TAG, "[BT-NATIVE] TARGET FOUND: FALSE");
                 call.reject("Target " + address + " not found (TARGET_NOT_PAIRED)");
@@ -175,6 +184,7 @@ public class BluetoothSppPlugin extends Plugin {
     }
 
     private void startReadThread() {
+        Log.d(TAG, "[BT-NATIVE] READ THREAD STARTED");
         readThread = new Thread(() -> {
             byte[] buffer = new byte[1024];
             int bytes;
