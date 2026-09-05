@@ -98,7 +98,6 @@ export class BluetoothSppTransport implements ITransport {
 
     this.setStatus('CONNECTING');
     this.isConnecting = true;
-    console.log('[BT-TS] CONNECT CALLED');
 
     const isNative = Capacitor.isNativePlatform();
     const runtime = isNative ? 'ANDROID_NATIVE' : 'WEB_BROWSER';
@@ -107,53 +106,26 @@ export class BluetoothSppTransport implements ITransport {
     if (!isNative) {
       const errMsg = 'CLASSIC_SPP_REQUIRES_ANDROID_NATIVE';
       console.error(errMsg);
+      console.log(`[BT-CONNECT] FAILED error=${errMsg}`);
       this.setStatus('ERROR', errMsg);
       this.isConnecting = false;
       return false;
     }
 
-    const targetMac = (this.config.bluetoothMacAddress || '24:6F:28:B4:7A:1C').trim().toUpperCase();
+    const targetMac = (this.config.bluetoothMacAddress || '').trim().toUpperCase();
+    if (!targetMac) {
+      const errMsg = 'No Bluetooth MAC address specified. Please scan and select a device.';
+      console.error(`[BT-CONNECT] FAILED error=${errMsg}`);
+      this.setStatus('ERROR', errMsg);
+      this.isConnecting = false;
+      return false;
+    }
+
+    console.log(`[BT-CONNECT] START address=${targetMac}`);
 
     try {
-      try {
-        const permStatus = await (BluetoothSpp as any).checkPermissions();
-        if (permStatus.bluetooth !== 'granted') {
-           console.log('[BT-NATIVE] Requesting Bluetooth permissions from Capacitor...');
-           const reqStatus = await (BluetoothSpp as any).requestPermissions();
-           if (reqStatus.bluetooth !== 'granted') {
-              console.warn('[BT-NATIVE] User denied bluetooth permissions');
-           }
-        }
-      } catch (e) {
-        console.log('[BT-NATIVE] Permission check skipped or failed', e);
-      }
-
-      const pairedResult = await BluetoothSpp.getPairedDevices();
-      let isDeviceFound = false;
-      const rawDevices: any[] = pairedResult.devices || [];
-      const devices: BluetoothDeviceInfo[] = rawDevices.map(d => ({
-        name: d.name || 'Unknown',
-        address: d.address || '',
-        bonded: true,
-        type: 'CLASSIC_SPP' as const
-      }));
-      
-      for (const d of devices) {
-        const addr = (d.address || '').trim().toUpperCase();
-        if (addr === targetMac) {
-          isDeviceFound = true;
-        }
-      }
-
-      console.log(`[BT-NATIVE] TARGET MAC: ${targetMac}`);
-      console.log(`[BT-NATIVE] TARGET FOUND: ${isDeviceFound ? 'TRUE' : 'FALSE'}`);
-      console.log(`[BT-NATIVE] Proceeding with RFCOMM connection to ${targetMac}`);
-
-      console.log(`[BT-NATIVE] RFCOMM CONNECT START`);
-      console.log(`[BT-NATIVE] SPP UUID: 00001101-0000-1000-8000-00805F9B34FB`);
-
       await BluetoothSpp.connect({ address: targetMac });
-      console.log('[BT-NATIVE] RFCOMM CONNECT SUCCESS');
+      console.log('[BT-CONNECT] SUCCESS');
 
       await this.startNativeBtReadLoop();
       
@@ -170,7 +142,7 @@ export class BluetoothSppTransport implements ITransport {
       this.lastErrorStackTrace = errObj.stack || new Error().stack || 'No stack trace available';
       this.setStatus('ERROR', errMsg);
 
-      console.log(`[BT-NATIVE] CONNECT FAILURE: ${errMsg}`);
+      console.log(`[BT-CONNECT] FAILED error=${errMsg}`);
       this.isConnecting = false;
       return false;
     }
@@ -179,29 +151,105 @@ export class BluetoothSppTransport implements ITransport {
   /**
    * Scan for paired / discoverable Bluetooth Classic SPP devices
    */
-  public async scanDevices(): Promise<BluetoothDeviceInfo[]> {
+  public async scanDevices(onDeviceDiscovered?: (dev: BluetoothDeviceInfo) => void): Promise<BluetoothDeviceInfo[]> {
     this.isScanning = true;
-    console.log('[BT-DISCOVERY] START');
+    console.log('[BT-SCAN] START');
     const isNative = Capacitor.isNativePlatform();
+
     if (!isNative) {
       this.isScanning = false;
+      console.log('[BT-SCAN] FINISHED');
       return [];
     }
+
+    const devicesMap = new Map<string, BluetoothDeviceInfo>();
+
+    // 1. First fetch bonded/paired devices
     try {
       const pairedResult = await BluetoothSpp.getPairedDevices();
-      this.isScanning = false;
-      const rawDevices: any[] = pairedResult.devices || [];
-      return rawDevices.map(d => ({
-        name: d.name || 'Unknown',
-        address: d.address || '',
-        bonded: true,
-        type: 'CLASSIC_SPP' as const
-      }));
+      const rawPaired = pairedResult?.devices || [];
+      for (const d of rawPaired) {
+        const addr = (d.address || '').trim().toUpperCase();
+        if (addr) {
+          const devInfo: BluetoothDeviceInfo = {
+            name: d.name || 'Paired Device',
+            address: addr,
+            bonded: true,
+            type: 'CLASSIC_SPP'
+          };
+          devicesMap.set(addr, devInfo);
+          console.log(`[BT-SCAN] DEVICE_FOUND name=${devInfo.name} address=${devInfo.address}`);
+          if (onDeviceDiscovered) {
+            onDeviceDiscovered(devInfo);
+          }
+        }
+      }
     } catch (e) {
-      console.error('[BT-DISCOVERY] Error scanning devices', e);
-      this.isScanning = false;
-      return [];
+      console.warn('[BT-SCAN] Failed to fetch paired devices:', e);
     }
+
+    // 2. Set up listener for live found devices
+    let foundHandle: any = null;
+    let finishHandle: any = null;
+
+    let discoveryFinishedResolve: () => void;
+    const discoveryFinishedPromise = new Promise<void>((resolve) => {
+      discoveryFinishedResolve = resolve;
+    });
+
+    try {
+      foundHandle = await BluetoothSpp.addListener('onBluetoothDeviceFound', (device: any) => {
+        const addr = (device.address || '').trim().toUpperCase();
+        if (!addr) return;
+
+        const devInfo: BluetoothDeviceInfo = {
+          name: device.name || 'Unknown',
+          address: addr,
+          bonded: Boolean(device.bonded),
+          rssi: typeof device.rssi === 'number' ? device.rssi : undefined,
+          type: (device.type === 'BLE' ? 'BLE' : 'CLASSIC_SPP') as any
+        };
+
+        devicesMap.set(addr, devInfo);
+        console.log(`[BT-SCAN] DEVICE_FOUND name=${devInfo.name} address=${devInfo.address}`);
+        if (onDeviceDiscovered) {
+          onDeviceDiscovered(devInfo);
+        }
+      });
+
+      finishHandle = await BluetoothSpp.addListener('onBluetoothDiscoveryFinished', () => {
+        if (discoveryFinishedResolve) {
+          discoveryFinishedResolve();
+        }
+      });
+
+      // 3. Initiate native discovery
+      await BluetoothSpp.startDiscovery();
+
+      // Wait up to 12 seconds for native discovery broadcast to complete
+      await Promise.race([
+        discoveryFinishedPromise,
+        new Promise((resolve) => setTimeout(resolve, 12000))
+      ]);
+
+    } catch (err) {
+      console.error('[BT-SCAN] Error during native discovery:', err);
+    } finally {
+      try {
+        await BluetoothSpp.stopDiscovery();
+      } catch (ignored) {}
+
+      if (foundHandle) {
+        try { foundHandle.remove(); } catch (ignored) {}
+      }
+      if (finishHandle) {
+        try { finishHandle.remove(); } catch (ignored) {}
+      }
+      this.isScanning = false;
+      console.log('[BT-SCAN] FINISHED');
+    }
+
+    return Array.from(devicesMap.values());
   }
 
   public async disconnect(): Promise<void> {

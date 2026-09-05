@@ -37,7 +37,7 @@ export interface ITransport {
   onCanFrame(callback: (frame: CanFrame) => void): () => void;
   onStateChange(callback: (state: ConnectionStatus, error?: string) => void): () => void;
   
-  scanDevices?(): Promise<BluetoothDeviceInfo[]>;
+  scanDevices?(onDeviceFound?: (dev: BluetoothDeviceInfo) => void): Promise<BluetoothDeviceInfo[]>;
 }
 
 export const defaultConnectionConfig: ConnectionConfig = {
@@ -45,7 +45,7 @@ export const defaultConnectionConfig: ConnectionConfig = {
   ip: '192.168.4.1',
   port: 35000,
   bluetoothDeviceName: 'ESP32-OBD-PRO',
-  bluetoothMacAddress: '24:6F:28:B4:7A:1C',
+  bluetoothMacAddress: '',
   bluetoothSppUuid: '00001101-0000-1000-8000-00805F9B34FB',
   connectionTimeoutMs: 5000,
   responseTimeoutMs: 2500,

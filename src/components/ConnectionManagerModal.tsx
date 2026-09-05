@@ -24,8 +24,8 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
   const [selectedTransport, setSelectedTransport] = useState<TransportType>(config.transportType || 'WIFI_TCP');
   const [ip, setIp] = useState<string>(config.ip || '192.168.4.1');
   const [port, setPort] = useState<number>(config.port || 35000);
-  const [btDeviceName, setBtDeviceName] = useState<string>(config.bluetoothDeviceName || 'ESP32-OBD-PRO');
-  const [btMac, setBtMac] = useState<string>(config.bluetoothMacAddress || '24:6F:28:B4:7A:1C');
+  const [btDeviceName, setBtDeviceName] = useState<string>(config.bluetoothDeviceName || '');
+  const [btMac, setBtMac] = useState<string>(config.bluetoothMacAddress || '');
   const [isScanningBt, setIsScanningBt] = useState<boolean>(false);
   const [discoveredDevices, setDiscoveredDevices] = useState<BluetoothDeviceInfo[]>([]);
   const [isConnecting, setIsConnecting] = useState<boolean>(false);
@@ -41,8 +41,8 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
       setSelectedTransport(config.transportType || 'WIFI_TCP');
       setIp(config.ip || '192.168.4.1');
       setPort(config.port || 35000);
-      setBtDeviceName(config.bluetoothDeviceName || 'ESP32-OBD-PRO');
-      setBtMac(config.bluetoothMacAddress || '24:6F:28:B4:7A:1C');
+      setBtDeviceName(config.bluetoothDeviceName || '');
+      setBtMac(config.bluetoothMacAddress || '');
     }
   }, [isOpen]);
 
@@ -57,7 +57,7 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
         savedList.push({
           name,
           address,
-          bonded: true,
+          bonded: false,
           rssi: -50,
           type: 'CLASSIC_SPP'
         });
@@ -72,14 +72,23 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
     setIsScanningBt(true);
     setDiscoveredDevices([]);
     try {
-      // If we have manual inputs, make sure they are saved so they appear in this search!
-      saveCustomDevice(btDeviceName, btMac);
-      // Simulate/perform active scanning delay to let the spinner rotate and show real "Searching..."
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      const devices = await transportManager.scanBluetoothDevices();
+      if (btDeviceName && btMac) {
+        saveCustomDevice(btDeviceName, btMac);
+      }
+      const devices = await transportManager.scanBluetoothDevices((newDev) => {
+        setDiscoveredDevices(prev => {
+          const idx = prev.findIndex(d => d.address.toUpperCase() === newDev.address.toUpperCase());
+          if (idx >= 0) {
+            const updated = [...prev];
+            updated[idx] = newDev;
+            return updated;
+          }
+          return [...prev, newDev];
+        });
+      });
       setDiscoveredDevices(devices);
-    } catch {
-      setDiscoveredDevices([]);
+    } catch (err) {
+      console.warn('[BT-SCAN] Error:', err);
     } finally {
       setIsScanningBt(false);
     }
@@ -319,7 +328,7 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 text-xs font-bold text-blue-400 uppercase tracking-wider">
                   <Bluetooth className="w-4 h-4" />
-                  {isRtl ? 'أجهزة البلوتوث الكلاسيكي المقترنة' : 'Paired Bluetooth Classic Devices'}
+                  {isRtl ? 'أجهزة البلوتوث المكتشفة والمقترنة' : 'Discovered & Paired Bluetooth Devices'}
                 </div>
                 <div className="flex items-center gap-2">
                   {typeof navigator !== 'undefined' && (navigator as any).bluetooth && (
@@ -399,14 +408,26 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
                           <Bluetooth className={`w-4 h-4 ${isSelected ? 'text-blue-400' : 'text-slate-500'}`} />
                           <div>
                             <div className="text-xs font-bold font-mono">{dev.name}</div>
-                            <div className="text-[11px] text-slate-400 font-mono">{dev.address}</div>
+                            <div className="text-[11px] text-slate-400 font-mono flex items-center gap-1.5">
+                              <span>{dev.address}</span>
+                              {dev.rssi !== undefined && dev.rssi !== -128 && (
+                                <span className="text-[10px] text-slate-500 font-mono">({dev.rssi} dBm)</span>
+                              )}
+                            </div>
                           </div>
                         </div>
 
                         <div className="flex items-center gap-2">
-                          {dev.bonded && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30 font-mono">
+                            {dev.type || 'CLASSIC_SPP'}
+                          </span>
+                          {dev.bonded ? (
                             <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 font-mono">
                               PAIRED
+                            </span>
+                          ) : (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 border border-amber-500/40 font-mono">
+                              NEARBY
                             </span>
                           )}
                           {isSelected && (

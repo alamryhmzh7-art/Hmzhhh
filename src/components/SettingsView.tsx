@@ -64,7 +64,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ config, setConfig, s
       ip: '192.168.4.1',
       port: 35000,
       bluetoothDeviceName: 'ESP32-OBD-PRO',
-      bluetoothMacAddress: '24:6F:28:B4:7A:1C',
+      bluetoothMacAddress: '',
       bluetoothSppUuid: '00001101-0000-1000-8000-00805F9B34FB',
       connectionTimeoutMs: 4000,
       responseTimeoutMs: 2500,
@@ -232,7 +232,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ config, setConfig, s
                 </label>
                 <input
                   type="text"
-                  value={formData.bluetoothMacAddress || '24:6F:28:B4:7A:1C'}
+                  placeholder="e.g. 24:6F:28:B4:7A:1C (or scan from Connection Manager)"
+                  value={formData.bluetoothMacAddress || ''}
                   onChange={(e) => setFormData({ ...formData, bluetoothMacAddress: e.target.value })}
                   className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-blue-500"
                 />

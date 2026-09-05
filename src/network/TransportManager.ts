@@ -156,9 +156,9 @@ export class TransportManager {
     console.log(`[MANAGER] Disconnected. State: ${this.activeTransport.getState()}, isConnected: ${this.activeTransport.isConnected()}`);
   }
 
-  public async scanBluetoothDevices(): Promise<BluetoothDeviceInfo[]> {
+  public async scanBluetoothDevices(onDeviceFound?: (dev: BluetoothDeviceInfo) => void): Promise<BluetoothDeviceInfo[]> {
     if (this.btTransport.scanDevices) {
-      return this.btTransport.scanDevices();
+      return this.btTransport.scanDevices(onDeviceFound);
     }
     return [];
   }
