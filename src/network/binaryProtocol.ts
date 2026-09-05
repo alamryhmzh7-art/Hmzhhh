@@ -161,7 +161,7 @@ export class BinaryProtocol {
     packet[5 + len + 2] = this.TRAILER_BYTE_2;
 
     const hex = Array.from(packet).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
-    console.log(`[PROTO-TX] CMD=0x${cmd.toString(16).padStart(2, '0').toUpperCase()} LEN=${len} HEX=${hex}`);
+    console.log(`[PROTO-TX] CMD=0x${cmd.toString(16).padStart(2, '0').toUpperCase()} LEN=${len} HEX=[${hex}]`);
 
     return packet;
   }
@@ -199,7 +199,7 @@ export class BinaryProtocol {
           if (isValid) {
             const rawFrame = streamBuffer.slice(i, i + totalExpectedLength);
             const hex = Array.from(rawFrame).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
-            console.log(`[PROTO-RX] CMD=0x${cmd.toString(16).padStart(2, '0').toUpperCase()} LEN=${len} HEX=${hex}`);
+            console.log(`[PROTO-RX] CMD=0x${cmd.toString(16).padStart(2, '0').toUpperCase()} LEN=${len} HEX=[${hex}]`);
 
             const decoded = this.decodePacket(cmd, payload, rawFrame);
             packets.push(decoded);

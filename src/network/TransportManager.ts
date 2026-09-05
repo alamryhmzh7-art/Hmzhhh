@@ -538,20 +538,24 @@ export class TransportManager {
    * Uses a mutex queue to ensure diagnostic requests are strictly sequential.
    */
   public async sendRequest(requestBytes: number[], targetCanId: string = '0x7E0'): Promise<CommunicationPacket> {
+    const correlationId = `REQ-${++this.sequenceId}`;
+    const reqHex = requestBytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+    console.log(`[APP-TX] [${correlationId}] QUEUED: ID=${targetCanId} PAYLOAD=[${reqHex}]`);
+
     // Enqueue the request to ensure serial execution
     return new Promise((resolve) => {
       this.requestQueue = this.requestQueue.then(async () => {
         try {
-          const result = await this.executeRequest(requestBytes, targetCanId);
+          console.log(`[APP-TX] [${correlationId}] STARTING EXECUTION`);
+          const result = await this.executeRequest(requestBytes, targetCanId, correlationId);
           resolve(result);
         } catch (err: any) {
-          // This should generally not happen as executeRequest catches its own errors 
-          // and returns a packet, but for safety:
+          console.error(`[APP-TX] [${correlationId}] CRITICAL ERROR:`, err);
           resolve(commLogger.logPacket({
             direction: '[OBD TX]',
             protocol: this.config.protocol,
             canIdHex: targetCanId,
-            requestRaw: requestBytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' '),
+            requestRaw: reqHex,
             error: err?.message || 'Critical Queue Error',
             durationMs: 0,
             status: 'ERROR'
@@ -561,15 +565,13 @@ export class TransportManager {
     });
   }
 
-  private async executeRequest(requestBytes: number[], targetCanId: string = '0x7E0'): Promise<CommunicationPacket> {
-    this.sequenceId++;
+  private async executeRequest(requestBytes: number[], targetCanId: string = '0x7E0', correlationId: string): Promise<CommunicationPacket> {
     const startTime = performance.now();
     const reqHex = requestBytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
     const numCanId = parseInt(targetCanId.replace('0x', ''), 16) || 0x7E0;
     const isExtended = targetCanId.length > 5;
-    const correlationId = `OBD-${this.sequenceId}`;
     
-    console.log(`[OBD] [${correlationId}] REQ TO ${targetCanId}: [${reqHex}]`);
+    console.log(`[OBD-TX] [${correlationId}] ID=${targetCanId} PAYLOAD=[${reqHex}]`);
 
     // Guard: Mock vs Real Mode strict isolation
     if (this.config.isMockMode) {
@@ -608,11 +610,18 @@ export class TransportManager {
     }
 
     try {
+      // ISO-TP Framing Logic
       let canPayload: number[];
       let multiFrameTx = false;
       let remainingTxBytes: number[] = [];
 
-      if (requestBytes.length <= 7) {
+      // PROTECTION: If user passed 8 bytes and first byte is 0-7, it's probably already an ISO-TP SF.
+      // We should NOT wrap it again.
+      if (requestBytes.length === 8 && requestBytes[0] <= 0x07) {
+        console.log(`[OBD-TX] [${correlationId}] Detected already-formatted ISO-TP Single Frame. Bypassing auto-wrap.`);
+        canPayload = [...requestBytes];
+      } else if (requestBytes.length <= 7) {
+        // Single Frame (SF)
         canPayload = [requestBytes.length, ...requestBytes];
         while (canPayload.length < 8) canPayload.push(0x00);
       } else {
@@ -620,24 +629,25 @@ export class TransportManager {
         multiFrameTx = true;
         canPayload = [0x10, (requestBytes.length >> 8) & 0x0F, requestBytes.length & 0xFF, ...requestBytes.slice(0, 5)];
         remainingTxBytes = requestBytes.slice(5);
+        console.log(`[ISO-TP-TX] [${correlationId}] Initiating Multi-frame TX (Total Len: ${requestBytes.length})`);
       }
 
-      const seq = this.sequenceId;
+      const seq = ++this.sequenceId;
       let actualResponseIdNum = numCanId + 8;
 
       const responsePromise = new Promise<number[]>((resolve, reject) => {
-        const timeoutMs = requestBytes.length > 7 ? 7000 : 2500; 
+        const timeoutMs = requestBytes.length > 7 ? 7000 : 3500; 
         const timer = setTimeout(() => {
           this.cleanupRequest(seq);
-          const expectedRange = (numCanId === 0x7DF) ? '0x7E8-0x7EF' : '0x' + (numCanId + 8).toString(16).toUpperCase();
-          console.warn(`[OBD-TIMEOUT] [${correlationId}] expected=${expectedRange}`);
+          const expectedIdHex = (numCanId === 0x7DF) ? '0x7E8-0x7EF' : '0x' + (numCanId + 8).toString(16).toUpperCase();
+          console.warn(`[OBD-TIMEOUT] [${correlationId}] NO RESPONSE from ECU. Expected ID: ${expectedIdIdHex} Request: ${reqHex}`);
           
           commLogger.logPacket({
             direction: '[OBD-TIMEOUT]',
             protocol: this.config.protocol,
             canIdHex: `0x${numCanId.toString(16).toUpperCase()}`,
             requestRaw: reqHex,
-            error: `TIMEOUT: Expected ${expectedRange}`,
+            error: `TIMEOUT: No response from ${expectedIdIdHex}`,
             durationMs: timeoutMs,
             status: 'TIMEOUT'
           });
@@ -693,8 +703,11 @@ export class TransportManager {
       const ok = await this.activeTransport.sendCanFrame(numCanId, canPayload, isExtended);
       if (!ok) {
         this.cleanupRequest(seq);
+        console.error(`[CAN-TX] [${correlationId}] FAILED to send to transport`);
         throw new Error('Failed to send packet over transport');
       }
+
+      console.log(`[CAN-TX] [${correlationId}] SENT SUCCESS: ID=0x${numCanId.toString(16).toUpperCase()} DATA=[${canPayload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
 
       // If we sent a First Frame, we need to handle Consecutive Frames here or via the receiver.
       // Current architecture handles Flow Control and CF reassembly in handleCanFrame.
@@ -718,8 +731,9 @@ export class TransportManager {
 
     } catch (err: any) {
       const durationMs = Math.round(performance.now() - startTime);
+      console.error(`[OBD-ERROR] [${correlationId}] ${err.message} (${durationMs}ms)`);
       return commLogger.logPacket({
-        direction: '[OBD TX]',
+        direction: '[OBD-TIMEOUT]',
         protocol: this.config.protocol,
         canIdHex: targetCanId,
         requestRaw: reqHex,

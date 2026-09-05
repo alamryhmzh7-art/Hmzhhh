@@ -317,7 +317,7 @@ export class BluetoothSppTransport implements ITransport {
   public async sendCanFrame(canId: number, data: number[], isExtended: boolean = false): Promise<boolean> {
     if (!this.isConnected()) return false;
     const hexData = data.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
-    console.log(`[CAN-TX] ID=0x${canId.toString(16).toUpperCase()} DLC=${data.length} DATA=${hexData}`);
+    console.log(`[BT-TX] CAN_ID=0x${canId.toString(16).toUpperCase()} DLC=${data.length} DATA=[${hexData}]`);
     const packet = BinaryProtocol.encodeCanFrame(canId, data, isExtended);
     return this.sendRaw(packet);
   }
@@ -482,7 +482,7 @@ export class BluetoothSppTransport implements ITransport {
 
     packets.forEach(pkt => {
       const pktHex = Array.from(pkt.rawFrame).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
-      console.log(`[BT-RX-FRAME] CMD=0x${pkt.cmd.toString(16).toUpperCase()} DATA=[${pktHex}]`);
+      console.log(`[BT-RX-FRAME] CMD=0x${pkt.cmd.toString(16).toUpperCase()} LEN=${pkt.payload.length} HEX=[${pktHex}]`);
       this.processDecodedPacket(pkt);
     });
   }
