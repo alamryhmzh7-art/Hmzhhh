@@ -74,16 +74,36 @@ export const CanMonitorView: React.FC<CanMonitorViewProps> = ({ status }) => {
     setFrames([]);
   };
 
-  const exportCanLog = () => {
+  const exportCanLog = async () => {
     const text = frames
       .map(f => `[${f.timestamp}] ${f.direction} ${f.id} [${f.dlc}] ${f.dataHex} | ${f.description || ''}`)
       .join('\n');
-    const blob = new Blob([text], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `Hamza_CAN_Bus_Stream_${Date.now()}.log`;
-    a.click();
+    const fileName = `HAMZA_CAN_BUS_LOG_${Date.now()}.txt`;
+
+    const { Filesystem, Directory, Encoding } = await import('@capacitor/filesystem');
+    const { Toast } = await import('@capacitor/toast');
+    const { Capacitor } = await import('@capacitor/core');
+
+    if (Capacitor.isNativePlatform()) {
+      try {
+        await Filesystem.writeFile({
+          path: fileName,
+          data: text,
+          directory: Directory.Documents,
+          encoding: Encoding.UTF8,
+        });
+        await Toast.show({ text: `تم حفظ سجل CAN: ${fileName}` });
+      } catch (e: any) {
+        await Toast.show({ text: `فشل الحفظ: ${e.message}` });
+      }
+    } else {
+      const blob = new Blob([text], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      a.click();
+    }
   };
 
   const filteredFrames = filterId

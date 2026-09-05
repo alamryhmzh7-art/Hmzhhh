@@ -78,6 +78,15 @@ export class TransportManager {
       
       // Log EVERY incoming CAN frame at the transport manager level
       console.log(`[TM-CAN-RX] CAN=0x${frameIdNum.toString(16).toUpperCase()} EXT=${frame.isExtended} DLC=${frame.dlc} DATA=[${frame.dataHex}]`);
+      commLogger.logPacket({
+        direction: '[CAN-RX]',
+        protocol: this.config.protocol,
+        canIdHex: `0x${frameIdNum.toString(16).toUpperCase()}`,
+        dlc: frame.dlc,
+        responseRaw: frame.dataHex,
+        durationMs: 0,
+        status: 'SUCCESS'
+      });
 
       for (const seqNumStr in this.pendingRequests) {
         const seq = parseInt(seqNumStr);
@@ -518,6 +527,17 @@ export class TransportManager {
               this.cleanupRequest(seq);
               const expectedRange = (numCanId === 0x7DF) ? '0x7E8-0x7EF' : '0x' + (numCanId + 8).toString(16).toUpperCase();
               console.warn(`[OBD-TIMEOUT] [${correlationId}] seq=${seq} request=${requestBytes[0].toString(16).padStart(2, '0')} ${requestBytes[1].toString(16).padStart(2, '0')} txCanId=0x${numCanId.toString(16).toUpperCase()} expected=${expectedRange}`);
+              
+              commLogger.logPacket({
+                direction: '[OBD-TIMEOUT]',
+                protocol: this.config.protocol,
+                canIdHex: `0x${numCanId.toString(16).toUpperCase()}`,
+                requestRaw: reqHex,
+                error: `TIMEOUT: Expected ${expectedRange}`,
+                durationMs: 2500,
+                status: 'TIMEOUT'
+              });
+              
               reject(new Error('TIMEOUT_WAITING_FOR_ECU_RESPONSE'));
            }, 2500);
 
@@ -541,6 +561,16 @@ export class TransportManager {
 
         // 2. Now safely send the hardware request
         console.log(`[TX] CAN=0x${numCanId.toString(16).toUpperCase()} DATA=[${canPayload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
+        commLogger.logPacket({
+          direction: '[TX]',
+          protocol: this.config.protocol,
+          canIdHex: `0x${numCanId.toString(16).toUpperCase()}`,
+          dlc: canPayload.length,
+          requestRaw: canPayload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' '),
+          durationMs: 0,
+          status: 'SUCCESS'
+        });
+        
         const ok = await this.activeTransport.sendCanFrame(numCanId, canPayload, isExtended);
         if (!ok) {
            this.cleanupRequest(seq);
@@ -559,7 +589,7 @@ export class TransportManager {
       console.log(`[OBD-RX] [${correlationId}] CAN=${actualResponseIdHex} PAYLOAD=[${resHex}] (${durationMs}ms)`);
 
       const respPkt = commLogger.logPacket({
-        direction: '[OBD RX]',
+        direction: '[OBD-RX]',
         protocol: this.config.protocol,
         canIdHex: actualResponseIdHex,
         requestRaw: reqHex,

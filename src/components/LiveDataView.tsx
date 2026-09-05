@@ -152,15 +152,36 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
     return () => clearInterval(interval);
   }, [isStreaming, simRpm, simSpeed, status, isMockMode]);
 
-  const exportCsv = () => {
+  const exportCsv = async () => {
     const headers = 'Timestamp,RPM,Speed(km/h),Voltage(V)\n';
     const rows = history.map(h => `${h.timestamp},${h.rpm},${h.speed},${h.voltage}`).join('\n');
-    const blob = new Blob([headers + rows], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `Hamza_OBD_Telemetry_${Date.now()}.csv`;
-    a.click();
+    const csvData = headers + rows;
+    const fileName = `HAMZA_OBD_TELEMETRY_${Date.now()}.csv`;
+
+    const { Filesystem, Directory, Encoding } = await import('@capacitor/filesystem');
+    const { Toast } = await import('@capacitor/toast');
+    const { Capacitor } = await import('@capacitor/core');
+
+    if (Capacitor.isNativePlatform()) {
+      try {
+        await Filesystem.writeFile({
+          path: fileName,
+          data: csvData,
+          directory: Directory.Documents,
+          encoding: Encoding.UTF8,
+        });
+        await Toast.show({ text: `تم حفظ البيانات: ${fileName}` });
+      } catch (e: any) {
+        await Toast.show({ text: `فشل الحفظ: ${e.message}` });
+      }
+    } else {
+      const blob = new Blob([csvData], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      a.click();
+    }
   };
 
   const resetMinMax = () => {

@@ -195,9 +195,10 @@ export interface CommunicationPacket {
   id: string;
   sequenceId?: number;
   timestamp: string | number;
-  direction: CommDirection | string;
+  direction: string;
   protocol: string;
   canIdHex?: string;
+  dlc?: number;
   requestRaw?: string;
   responseRaw?: string;
   decodedData?: string;

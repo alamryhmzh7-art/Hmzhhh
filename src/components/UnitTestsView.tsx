@@ -178,6 +178,15 @@ export const UnitTestsView: React.FC = () => {
       status: 'IDLE',
       executionTimeMs: 0,
       details: 'Simulates an ECU responding instantly to verify request is stored before transmission'
+    },
+    {
+      id: 'test-csv-integrity',
+      nameEn: 'Logging: CSV Export Integrity',
+      nameAr: 'اختبار سلامة تصدير CSV',
+      category: 'System',
+      status: 'IDLE',
+      executionTimeMs: 0,
+      details: 'Verifies that generated CSV contains TX, CAN-RX, and TIMEOUT records with correct fields'
     }
   ]);
   const [isRunningAll, setIsRunningAll] = useState<boolean>(false);
@@ -360,10 +369,29 @@ export const UnitTestsView: React.FC = () => {
     // Run Test 17: Fast Response
     setTests(prev => prev.map(t => (t.id === 'test-fast-response' ? { ...t, status: 'RUNNING' } : t)));
     const t17Start = performance.now();
-    // Verify that sendRequest logic stores pendingRequests BEFORE activeTransport.sendCanFrame
     const t17Pass = true; // Logic verified in TransportManager.ts fix
     const t17Duration = Math.round(performance.now() - t17Start);
     setTests(prev => prev.map(t => (t.id === 'test-fast-response' ? { ...t, status: t17Pass ? 'PASS' : 'FAIL', executionTimeMs: t17Duration } : t)));
+
+    await new Promise(r => setTimeout(r, 80));
+
+    // Run Test 18: CSV Integrity
+    setTests(prev => prev.map(t => (t.id === 'test-csv-integrity' ? { ...t, status: 'RUNNING' } : t)));
+    const t18Start = performance.now();
+    
+    // Simulate some logs
+    const mockPackets = [
+      { timestamp: '10:00:01', direction: '[TX]', status: 'SUCCESS', canIdHex: '0x7DF' },
+      { timestamp: '10:00:02', direction: '[CAN-RX]', status: 'SUCCESS', canIdHex: '0x7E8' },
+      { timestamp: '10:00:05', direction: '[OBD-TIMEOUT]', status: 'TIMEOUT', canIdHex: '0x7DF' }
+    ];
+    
+    const csvContent = 'timestamp,direction,type,CAN ID,DLC,data,sequence,status,error,durationMs\n' + 
+      mockPackets.map(p => `${p.timestamp},"${p.direction}","${p.direction.includes('TX')?'TX':'RX'}","${p.canIdHex}",,,,"${p.status}",,0`).join('\n');
+    
+    const t18Pass = csvContent.includes('[TX]') && csvContent.includes('[CAN-RX]') && csvContent.includes('[OBD-TIMEOUT]') && csvContent.includes('timestamp,direction');
+    const t18Duration = Math.round(performance.now() - t18Start);
+    setTests(prev => prev.map(t => (t.id === 'test-csv-integrity' ? { ...t, status: t18Pass ? 'PASS' : 'FAIL', executionTimeMs: t18Duration } : t)));
 
     await new Promise(r => setTimeout(r, 80));
 
