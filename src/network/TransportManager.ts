@@ -75,6 +75,10 @@ export class TransportManager {
 
     const handleCanFrame = (frame: CanFrame) => {
       const frameIdNum = parseInt(frame.id.replace('0x', ''), 16);
+      
+      // Log EVERY incoming CAN frame at the transport manager level
+      console.log(`[TM-CAN-RX] CAN=0x${frameIdNum.toString(16).toUpperCase()} EXT=${frame.isExtended} DLC=${frame.dlc} DATA=[${frame.dataHex}]`);
+
       for (const seqNumStr in this.pendingRequests) {
         const seq = parseInt(seqNumStr);
         const req = this.pendingRequests[seq];
@@ -463,7 +467,7 @@ export class TransportManager {
     // In REAL MODE: verify physical connection
     if (!this.isConnected() && !this.config.isMockMode) {
       const errPkt = commLogger.logPacket({
-        direction: '[OBD RX]',
+        direction: '[OBD TX]',
         protocol: this.config.protocol,
         canIdHex: targetCanId,
         requestRaw: reqHex,
@@ -498,6 +502,7 @@ export class TransportManager {
       console.log(`${txLogPrefix} [${correlationId}] ID=0x${numCanId.toString(16).toUpperCase()} DATA=[${canPayload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
 
       let actualResponseIdNum = numCanId + 8;
+      
       if (this.config.isMockMode) {
         // Send through active transport mock pipeline
         await this.activeTransport.sendCanFrame(numCanId, canPayload, isExtended);
@@ -506,27 +511,22 @@ export class TransportManager {
         const { mockEcuServer } = await import('./mockEcuServer');
         responseBytes = await mockEcuServer.handleRequest(requestBytes);
       } else {
-        // Real hardware send
-        const ok = await this.activeTransport.sendCanFrame(numCanId, canPayload, isExtended);
-        if (!ok) throw new Error('Failed to send packet over transport');
-        
-        // Real response is picked up via stream listeners (ISO-TP reassembly handled in constructor)
+        // 1. MUST create and store pending request BEFORE sending CAN frame to prevent race conditions
         const seq = this.sequenceId;
-        responseBytes = await new Promise<number[]>((resolve, reject) => {
+        const responsePromise = new Promise<number[]>((resolve, reject) => {
            const timer = setTimeout(() => {
               this.cleanupRequest(seq);
-              console.warn(`[OBD] [${correlationId}] TIMEOUT waiting for ECU response on 0x${numCanId.toString(16).toUpperCase()}`);
+              const expectedRange = (numCanId === 0x7DF) ? '0x7E8-0x7EF' : '0x' + (numCanId + 8).toString(16).toUpperCase();
+              console.warn(`[OBD-TIMEOUT] [${correlationId}] seq=${seq} request=${requestBytes[0].toString(16).padStart(2, '0')} ${requestBytes[1].toString(16).padStart(2, '0')} txCanId=0x${numCanId.toString(16).toUpperCase()} expected=${expectedRange}`);
               reject(new Error('TIMEOUT_WAITING_FOR_ECU_RESPONSE'));
            }, 2500);
 
-           // Intercept resolve to capture actualResponseId
-           const originalResolve = resolve;
            const interceptedResolve = (data: number[]) => {
               const req = this.pendingRequests[seq];
               if (req && req.actualResponseId !== undefined) {
                 actualResponseIdNum = req.actualResponseId;
               }
-              originalResolve(data);
+              resolve(data);
            };
 
            this.pendingRequests[seq] = { 
@@ -538,6 +538,16 @@ export class TransportManager {
               timer 
            };
         });
+
+        // 2. Now safely send the hardware request
+        console.log(`[TX] CAN=0x${numCanId.toString(16).toUpperCase()} DATA=[${canPayload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
+        const ok = await this.activeTransport.sendCanFrame(numCanId, canPayload, isExtended);
+        if (!ok) {
+           this.cleanupRequest(seq);
+           throw new Error('Failed to send packet over transport');
+        }
+
+        responseBytes = await responsePromise;
       }
 
       const durationMs = Math.round(performance.now() - startTime);
@@ -546,7 +556,7 @@ export class TransportManager {
       
       const actualResponseIdHex = '0x' + actualResponseIdNum.toString(16).toUpperCase();
 
-      console.log(`${obdPrefix} [${correlationId}] RESP FROM ECU: [${resHex}] (${durationMs}ms)`);
+      console.log(`[OBD-RX] [${correlationId}] CAN=${actualResponseIdHex} PAYLOAD=[${resHex}] (${durationMs}ms)`);
 
       const respPkt = commLogger.logPacket({
         direction: '[OBD RX]',
@@ -564,7 +574,7 @@ export class TransportManager {
       const durationMs = Math.round(performance.now() - startTime);
       console.warn(`[OBD-FAIL] [${correlationId}] Error: ${err?.message || 'Response Timeout'}`);
       const errPkt = commLogger.logPacket({
-        direction: '[OBD RX]',
+        direction: '[OBD TX]',
         protocol: this.config.protocol,
         canIdHex: targetCanId,
         requestRaw: reqHex,

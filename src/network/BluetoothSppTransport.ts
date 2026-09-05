@@ -451,26 +451,36 @@ export class BluetoothSppTransport implements ITransport {
   private handleIncomingData(data: ArrayBuffer | Uint8Array | string) {
     let newBytes: Uint8Array;
     if (typeof data === 'string') {
-      const encoder = new TextEncoder();
-      newBytes = encoder.encode(data);
+       // WARNING: String conversion can mangle binary data if not carefully handled.
+       // The native plugin is already updated to send JSArray (byte values).
+       console.warn('[BT-RX-RAW] Received string data instead of byte array. Converting...');
+       const bytes = new Uint8Array(data.length);
+       for (let i = 0; i < data.length; i++) {
+         bytes[i] = data.charCodeAt(i) & 0xFF;
+       }
+       newBytes = bytes;
     } else if (data instanceof Uint8Array) {
       newBytes = data;
     } else {
       newBytes = new Uint8Array(data);
     }
 
+    const rxHex = Array.from(newBytes).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+    console.log(`[BT-RX-RAW] ${rxHex}`);
+
     const merged = new Uint8Array(this.rxBuffer.length + newBytes.length);
     merged.set(this.rxBuffer);
     merged.set(newBytes, this.rxBuffer.length);
     this.rxBuffer = merged;
 
-    const rxHex = Array.from(newBytes).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
-    console.log(`[BT-RX] ${rxHex}`);
-
     const { packets, remainingBuffer } = BinaryProtocol.parseStream(this.rxBuffer);
     this.rxBuffer = remainingBuffer;
 
-    packets.forEach(pkt => this.processDecodedPacket(pkt));
+    packets.forEach(pkt => {
+      const pktHex = Array.from(pkt.rawFrame).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+      console.log(`[BT-RX-FRAME] CMD=0x${pkt.cmd.toString(16).toUpperCase()} DATA=[${pktHex}]`);
+      this.processDecodedPacket(pkt);
+    });
   }
 
   private processDecodedPacket(pkt: DecodedBinaryPacket) {

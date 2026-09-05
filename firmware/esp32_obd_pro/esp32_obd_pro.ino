@@ -237,6 +237,13 @@ void loop() {
       uint16_t payloadLen = 6 + rxMsg.data_length_code;
       broadcastBinaryPacket(CMD_CAN_FRAME, payload, payloadLen);
 
+      // Log RX for debugging
+      Serial.printf("[ESP32-CAN-RX] ID=0x%X DLC=%d DATA=", rxMsg.identifier, rxMsg.data_length_code);
+      for (int i = 0; i < rxMsg.data_length_code; i++) {
+        Serial.printf("%02X ", rxMsg.data[i]);
+      }
+      Serial.println();
+
       // Flash status LED on active bus traffic
       digitalWrite(STATUS_LED_PIN, !digitalRead(STATUS_LED_PIN));
     }
