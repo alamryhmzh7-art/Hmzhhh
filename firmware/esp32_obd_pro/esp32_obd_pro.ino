@@ -35,6 +35,8 @@
 
 #define STATUS_LED_PIN            2 // Built-in LED on most ESP32 boards
 
+uint32_t currentCanSpeedKbps = CAN_DEFAULT_SPEED_KBPS;
+
 // Binary Protocol Constants
 #define PROTOCOL_MAGIC_1          0xAA
 #define PROTOCOL_MAGIC_2          0x55
@@ -115,6 +117,7 @@ void initCAN(uint32_t speedKbps) {
   if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
     if (twai_start() == ESP_OK) {
       stats.canInitialized = true;
+      currentCanSpeedKbps = speedKbps;
       Serial.printf("[CAN] TWAI Initialized successfully @ %d kbps\n", speedKbps);
       return;
     }
@@ -419,7 +422,7 @@ void sendCanStatus(bool toBluetooth) {
                      (twai_status.state == TWAI_STATE_BUS_OFF) ? 2 : 3;
 
   // 1-4: Speed
-  uint32_t speed = 500000;
+  uint32_t speed = currentCanSpeedKbps * 1000;
   statusPayload[1] = (speed >> 24) & 0xFF;
   statusPayload[2] = (speed >> 16) & 0xFF;
   statusPayload[3] = (speed >> 8) & 0xFF;

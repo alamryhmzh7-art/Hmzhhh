@@ -36,14 +36,21 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
   useEffect(() => {
     if (!isStreaming) return;
 
+    let isPolling = false;
+
     const interval = setInterval(async () => {
+      if (isPolling) return; // Prevent overlapping poll cycles
+      isPolling = true;
+
       const now = new Date().toLocaleTimeString();
-      let currentRpm = 2200;
-      let currentSpeed = 65;
-      let currentVolt = 14.15;
-      let currentCoolant = 88;
-      let currentTps = 18;
-      let currentLoad = 26;
+      
+      // Initialize as null (NO DATA) for Real Mode to avoid fake fallbacks
+      let currentRpm: number | null = isMockMode ? 2200 : null;
+      let currentSpeed: number | null = isMockMode ? 65 : null;
+      let currentVolt: number | null = isMockMode ? 14.15 : null;
+      let currentCoolant: number | null = isMockMode ? 88 : null;
+      let currentTps: number | null = isMockMode ? 18 : null;
+      let currentLoad: number | null = isMockMode ? 26 : null;
 
       if (isMockMode) {
         // Simulation mode ONLY when Demo Mode is explicitly active
@@ -57,54 +64,58 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
         mockEcuServer.setRpm(currentRpm);
         mockEcuServer.setSpeed(currentSpeed);
       } else if (status === 'CONNECTED') {
-        // Strict REAL MODE: Poll real OBD Mode 01 PIDs from vehicle ECU
+        // Strict REAL MODE: Sequential Polling (One PID at a time)
         try {
-          // Poll RPM (PID 0x0C)
+          // 1. Poll RPM (PID 0x0C)
           const respRpm = await transportManager.sendRequest([0x01, 0x0C], '0x7DF');
           if (respRpm.status === 'SUCCESS' && respRpm.responseRaw) {
             const bytes = respRpm.responseRaw.split(' ').map(b => parseInt(b, 16));
             if (bytes.length >= 4 && bytes[0] === 0x41 && bytes[1] === 0x0C) {
               currentRpm = Math.round(((bytes[2] * 256) + bytes[3]) / 4);
+              console.log(`[PID] 0C RPM=${currentRpm}`);
+            } else {
+              console.warn(`[PID-MISMATCH] Requested 01 0C, got: ${respRpm.responseRaw}`);
             }
           }
 
-          // Poll Speed (PID 0x0D)
+          // 2. Poll Speed (PID 0x0D)
           const respSpeed = await transportManager.sendRequest([0x01, 0x0D], '0x7DF');
           if (respSpeed.status === 'SUCCESS' && respSpeed.responseRaw) {
             const bytes = respSpeed.responseRaw.split(' ').map(b => parseInt(b, 16));
             if (bytes.length >= 3 && bytes[0] === 0x41 && bytes[1] === 0x0D) {
               currentSpeed = bytes[2];
+              console.log(`[PID] 0D SPEED=${currentSpeed}`);
+            } else {
+              console.warn(`[PID-MISMATCH] Requested 01 0D, got: ${respSpeed.responseRaw}`);
             }
           }
 
-          // Poll Coolant (PID 0x05)
+          // 3. Poll Coolant (PID 0x05)
           const respCoolant = await transportManager.sendRequest([0x01, 0x05], '0x7DF');
           if (respCoolant.status === 'SUCCESS' && respCoolant.responseRaw) {
             const bytes = respCoolant.responseRaw.split(' ').map(b => parseInt(b, 16));
             if (bytes.length >= 3 && bytes[0] === 0x41 && bytes[1] === 0x05) {
               currentCoolant = bytes[2] - 40;
+              console.log(`[PID] 05 COOLANT=${currentCoolant}`);
+            } else {
+              console.warn(`[PID-MISMATCH] Requested 01 05, got: ${respCoolant.responseRaw}`);
             }
           }
 
-          // Poll Module Voltage (PID 0x42)
+          // 4. Poll Module Voltage (PID 0x42)
           const respVolt = await transportManager.sendRequest([0x01, 0x42], '0x7DF');
           if (respVolt.status === 'SUCCESS' && respVolt.responseRaw) {
             const bytes = respVolt.responseRaw.split(' ').map(b => parseInt(b, 16));
             if (bytes.length >= 4 && bytes[0] === 0x41 && bytes[1] === 0x42) {
               currentVolt = parseFloat((((bytes[2] * 256) + bytes[3]) / 1000).toFixed(2));
+              console.log(`[PID] 42 VOLTAGE=${currentVolt}`);
+            } else {
+              console.warn(`[PID-MISMATCH] Requested 01 42, got: ${respVolt.responseRaw}`);
             }
           }
-        } catch {
-          // Timeout or communication drop in Real Mode -> do NOT inject fake values
+        } catch (e: any) {
+          console.error(`[POLL-ERROR] Cycle failed: ${e?.message}`);
         }
-      } else {
-        // Disconnected in Real Mode -> keep at 0 / idle
-        currentRpm = 0;
-        currentSpeed = 0;
-        currentVolt = 0;
-        currentCoolant = 0;
-        currentTps = 0;
-        currentLoad = 0;
       }
 
       setPids(prev => prev.map(p => {
@@ -116,21 +127,27 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
         if (p.pidHex === '04') val = currentLoad;
         if (p.pidHex === '42') val = currentVolt;
 
+        const numVal = typeof val === 'number' ? val : 0;
+
         return {
           ...p,
           currentValue: val,
-          minValue: Math.min(p.minValue, val),
-          maxValue: Math.max(p.maxValue, val)
+          minValue: val !== null ? Math.min(p.minValue, numVal) : p.minValue,
+          maxValue: val !== null ? Math.max(p.maxValue, numVal) : p.maxValue
         };
       }));
 
-      setHistory(h => [...h.slice(-25), {
-        timestamp: now,
-        rpm: currentRpm,
-        speed: currentSpeed,
-        voltage: currentVolt
-      }]);
-    }, 400);
+      if (currentRpm !== null && currentSpeed !== null && currentVolt !== null) {
+        setHistory(h => [...h.slice(-25), {
+          timestamp: now,
+          rpm: currentRpm as number,
+          speed: currentSpeed as number,
+          voltage: currentVolt as number
+        }]);
+      }
+      
+      isPolling = false;
+    }, 1000); // Polling cycle every 1000ms to allow for sequential completion
 
     return () => clearInterval(interval);
   }, [isStreaming, simRpm, simSpeed, status, isMockMode]);
@@ -177,7 +194,7 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
             {t('liveDataTitle')}
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Real-time PID Sensor Polling @ 4Hz (ISO 15765-4)
+            Sequential ECU PID Polling (ISO 15765-4)
           </p>
         </div>
 
@@ -248,7 +265,7 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
               </svg>
               <div className="absolute flex flex-col items-center">
                 <span className="text-3xl font-extrabold text-white font-['Chakra_Petch',sans-serif] tracking-wider">
-                  {Math.round(rpmVal)}
+                  {rpmVal !== null ? Math.round(rpmVal) : 'N/A'}
                 </span>
                 <span className="text-xs text-cyan-400 font-bold tracking-widest mt-1">
                   RPM
@@ -306,7 +323,7 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
               </svg>
               <div className="absolute flex flex-col items-center">
                 <span className="text-3xl font-extrabold text-white font-['Chakra_Petch',sans-serif] tracking-wider">
-                  {Math.round(speedVal)}
+                  {speedVal !== null ? Math.round(speedVal) : 'N/A'}
                 </span>
                 <span className="text-xs text-emerald-400 font-bold tracking-widest mt-1">
                   km/h
@@ -397,7 +414,11 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
 
               <div className="my-3 flex items-baseline justify-between">
                 <span className="text-2xl font-extrabold text-white font-mono tracking-tight">
-                  {typeof pid.currentValue === 'number' ? pid.currentValue.toFixed(pid.unit === 'V' ? 2 : 0) : pid.currentValue}
+                  {pid.currentValue !== null 
+                    ? (typeof pid.currentValue === 'number' 
+                        ? pid.currentValue.toFixed(pid.unit === 'V' ? 2 : 0) 
+                        : pid.currentValue) 
+                    : 'N/A'}
                 </span>
                 <span className="text-xs font-bold text-slate-400 font-mono">
                   {pid.unit}

@@ -21,7 +21,10 @@ interface PendingDiagnosticRequest {
   resolve: (data: number[]) => void;
   reject: (err: Error) => void;
   canId: number;
+  expectedResponseId?: number;
+  actualResponseId?: number;
   timer: any;
+  isoTpTimer?: any;
   correlationId: string;
   isExtended: boolean;
   isoTpBuffer?: {
@@ -75,17 +78,36 @@ export class TransportManager {
       for (const seqNumStr in this.pendingRequests) {
         const seq = parseInt(seqNumStr);
         const req = this.pendingRequests[seq];
-        const expectedResponseId = req.canId + 8;
         
-        // Matching logic
-        const isMatch = (req.canId === 0x7DF && frameIdNum >= 0x7E8 && frameIdNum <= 0x7EF) ||
-                        (frameIdNum === expectedResponseId) ||
-                        (req.isExtended && this.isExtendedMatch(req.canId, frameIdNum));
+        // Matching logic:
+        // 1. If we already know the response ID, it must match exactly.
+        // 2. If not, check if it's a valid potential responder for the request.
+        let isMatch = false;
+        if (req.actualResponseId !== undefined) {
+          isMatch = (frameIdNum === req.actualResponseId);
+        } else {
+          // Standard 11-bit rules
+          if (!req.isExtended) {
+            if (req.canId === 0x7DF) {
+              isMatch = (frameIdNum >= 0x7E8 && frameIdNum <= 0x7EF);
+            } else {
+              isMatch = (frameIdNum === req.canId + 8);
+            }
+          } else {
+            // Extended 29-bit matching
+            isMatch = this.isExtendedMatch(req.canId, frameIdNum);
+          }
+        }
 
         if (!isMatch) continue;
 
         const data = frame.dataBytes;
-        if (!data || data.length === 0) continue;
+        if (!data || data.length < 2) continue; // Minimum ISO-TP frame is PCI + Data
+
+        // Lock actual response ID once found (for functional addressing)
+        if (req.actualResponseId === undefined) {
+          req.actualResponseId = frameIdNum;
+        }
 
         const pciType = data[0] & 0xF0;
 
@@ -93,6 +115,9 @@ export class TransportManager {
         if (req.isoTpBuffer) {
            // Expecting Consecutive Frames (CF)
            if (pciType === 0x20) {
+              // Clear multi-frame timeout
+              if (req.isoTpTimer) clearTimeout(req.isoTpTimer);
+
               const cfSeq = data[0] & 0x0F;
               if (cfSeq === req.isoTpBuffer.expectedSequence) {
                 const remaining = req.isoTpBuffer.totalLength - req.isoTpBuffer.receivedBytes.length;
@@ -108,27 +133,28 @@ export class TransportManager {
 
                 if (req.isoTpBuffer.receivedBytes.length >= req.isoTpBuffer.totalLength) {
                   const fullPayload = req.isoTpBuffer.receivedBytes.slice(0, req.isoTpBuffer.totalLength);
-                  clearTimeout(req.timer);
-                  delete this.pendingRequests[seq];
+                  this.cleanupRequest(seq);
                   console.log(`[ISO-TP] [${req.correlationId}] Reassembled ${fullPayload.length} bytes.`);
                   req.resolve(fullPayload);
+                } else {
+                  // Set timeout for next CF
+                  req.isoTpTimer = setTimeout(() => {
+                    console.error(`[ISO-TP] [${req.correlationId}] CONSECUTIVE_FRAME_TIMEOUT`);
+                    this.cleanupRequest(seq);
+                    req.reject(new Error('ISO_TP_CONSECUTIVE_FRAME_TIMEOUT'));
+                  }, 1000);
                 }
               } else {
                 console.error(`[ISO-TP] [${req.correlationId}] SEQUENCE ERROR: Expected ${req.isoTpBuffer.expectedSequence}, got ${cfSeq}. Aborting.`);
-                clearTimeout(req.timer);
-                delete this.pendingRequests[seq];
+                this.cleanupRequest(seq);
                 req.reject(new Error('ISO_TP_SEQUENCE_MISMATCH'));
               }
            } else if (pciType === 0x10) {
-              // Restarting multi-frame session on same ID?
               console.warn(`[ISO-TP] [${req.correlationId}] Received new FF while session active. Resetting.`);
               this.handleFirstFrame(req, frameIdNum, data, seq);
            } else if (pciType === 0x00) {
-              // Received SF while multi-frame session active? 
               console.warn(`[ISO-TP] [${req.correlationId}] Received SF while multi-frame active. Aborting multi-frame.`);
               this.handleSingleFrame(req, frameIdNum, data, seq);
-           } else {
-              console.warn(`[ISO-TP] [${req.correlationId}] Unexpected PCI 0x${pciType.toString(16)} during CF session.`);
            }
            break;
         }
@@ -139,11 +165,7 @@ export class TransportManager {
         } else if (pciType === 0x10) {
            this.handleFirstFrame(req, frameIdNum, data, seq);
         } else {
-           // Raw fallback only if explicitly not ISO-TP
-           console.log(`[CAN-RX] [${req.correlationId}] Raw Frame: 0x${frameIdNum.toString(16).toUpperCase()}`);
-           clearTimeout(req.timer);
-           delete this.pendingRequests[seq];
-           req.resolve(data);
+           console.warn(`[ISO-TP] [${req.correlationId}] Ignoring non-ISO-TP frame 0x${pciType.toString(16)} on diagnostic ID`);
         }
         break;
       }
@@ -152,25 +174,40 @@ export class TransportManager {
     this.btTransport.onCanFrame(handleCanFrame);
   }
 
+  private cleanupRequest(seq: number) {
+    const req = this.pendingRequests[seq];
+    if (req) {
+      if (req.timer) clearTimeout(req.timer);
+      if (req.isoTpTimer) clearTimeout(req.isoTpTimer);
+      delete this.pendingRequests[seq];
+    }
+  }
+
   private handleSingleFrame(req: PendingDiagnosticRequest, frameIdNum: number, data: number[], seq: number) {
     const sfLength = data[0] & 0x0F;
     if (sfLength === 0 || sfLength > 7) {
        console.warn(`[ISO-TP] [${req.correlationId}] Invalid SF_DL: ${sfLength}`);
        return;
     }
+    if (data.length < sfLength + 1) {
+       console.warn(`[ISO-TP] [${req.correlationId}] SF too short: ${data.length} < ${sfLength + 1}`);
+       return;
+    }
     const payload = data.slice(1, 1 + sfLength);
-    clearTimeout(req.timer);
-    delete this.pendingRequests[seq];
+    this.cleanupRequest(seq);
     console.log(`[ISO-TP] [${req.correlationId}] Single Frame from 0x${frameIdNum.toString(16).toUpperCase()}: [${payload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
     req.resolve(payload);
   }
 
   private handleFirstFrame(req: PendingDiagnosticRequest, frameIdNum: number, data: number[], seq: number) {
+    if (data.length < 8) {
+       console.warn(`[ISO-TP] [${req.correlationId}] FF too short: ${data.length}`);
+       return;
+    }
     const totalLength = ((data[0] & 0x0F) << 8) | data[1];
     if (totalLength <= 6 || totalLength > 4095) {
        console.error(`[ISO-TP] [${req.correlationId}] Invalid FF_DL: ${totalLength}. Aborting.`);
-       clearTimeout(req.timer);
-       delete this.pendingRequests[seq];
+       this.cleanupRequest(seq);
        req.reject(new Error('ISO_TP_INVALID_LENGTH'));
        return;
     }
@@ -185,11 +222,17 @@ export class TransportManager {
     const fcTargetId = this.resolveIsoTpFlowControlId(req.canId, frameIdNum, req.isExtended);
     if (fcTargetId === null) {
       console.error(`[ISO-TP] [${req.correlationId}] FAILED to determine Flow Control ID for response 0x${frameIdNum.toString(16).toUpperCase()}. Aborting.`);
-      clearTimeout(req.timer);
-      delete this.pendingRequests[seq];
+      this.cleanupRequest(seq);
       req.reject(new Error('ISO_TP_ADDRESSING_ERROR'));
       return;
     }
+
+    // Set timeout for first CF
+    req.isoTpTimer = setTimeout(() => {
+      console.error(`[ISO-TP] [${req.correlationId}] CONSECUTIVE_FRAME_TIMEOUT (Initial)`);
+      this.cleanupRequest(seq);
+      req.reject(new Error('ISO_TP_CONSECUTIVE_FRAME_TIMEOUT'));
+    }, 1000);
 
     // FC Frame: BS=0, STmin=0 (Standard)
     const fcFrame = [0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
@@ -197,8 +240,7 @@ export class TransportManager {
       console.log(`[ISO-TP] [${req.correlationId}] Sent Flow Control (FC) to 0x${fcTargetId.toString(16).toUpperCase()}`);
     }).catch(err => {
       console.error(`[ISO-TP] [${req.correlationId}] Failed to send Flow Control:`, err);
-      clearTimeout(req.timer);
-      delete this.pendingRequests[seq];
+      this.cleanupRequest(seq);
       req.reject(new Error('FLOW_CONTROL_SEND_FAILED'));
     });
   }
@@ -455,6 +497,7 @@ export class TransportManager {
 
       console.log(`${txLogPrefix} [${correlationId}] ID=0x${numCanId.toString(16).toUpperCase()} DATA=[${canPayload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
 
+      let actualResponseIdNum = numCanId + 8;
       if (this.config.isMockMode) {
         // Send through active transport mock pipeline
         await this.activeTransport.sendCanFrame(numCanId, canPayload, isExtended);
@@ -471,11 +514,29 @@ export class TransportManager {
         const seq = this.sequenceId;
         responseBytes = await new Promise<number[]>((resolve, reject) => {
            const timer = setTimeout(() => {
-              delete this.pendingRequests[seq];
+              this.cleanupRequest(seq);
               console.warn(`[OBD] [${correlationId}] TIMEOUT waiting for ECU response on 0x${numCanId.toString(16).toUpperCase()}`);
               reject(new Error('TIMEOUT_WAITING_FOR_ECU_RESPONSE'));
            }, 2500);
-           this.pendingRequests[seq] = { resolve, reject, canId: numCanId, isExtended, correlationId, timer };
+
+           // Intercept resolve to capture actualResponseId
+           const originalResolve = resolve;
+           const interceptedResolve = (data: number[]) => {
+              const req = this.pendingRequests[seq];
+              if (req && req.actualResponseId !== undefined) {
+                actualResponseIdNum = req.actualResponseId;
+              }
+              originalResolve(data);
+           };
+
+           this.pendingRequests[seq] = { 
+              resolve: interceptedResolve, 
+              reject, 
+              canId: numCanId, 
+              isExtended, 
+              correlationId, 
+              timer 
+           };
         });
       }
 
@@ -483,12 +544,14 @@ export class TransportManager {
       const resHex = responseBytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
       const parsed = PacketParser.parse(responseBytes);
       
+      const actualResponseIdHex = '0x' + actualResponseIdNum.toString(16).toUpperCase();
+
       console.log(`${obdPrefix} [${correlationId}] RESP FROM ECU: [${resHex}] (${durationMs}ms)`);
 
       const respPkt = commLogger.logPacket({
         direction: '[OBD RX]',
         protocol: this.config.protocol,
-        canIdHex: (numCanId === 0x7DF || numCanId === 0x7E0) ? '0x7E8' : '0x7E9',
+        canIdHex: actualResponseIdHex,
         requestRaw: reqHex,
         responseRaw: resHex,
         decodedData: parsed.asciiString,
