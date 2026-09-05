@@ -80,7 +80,7 @@ public class BluetoothSppPlugin extends Plugin {
         } catch (Exception ignored) {}
     }
 
-    private boolean hasRequiredPermissions() {
+    private boolean checkBluetoothPermissions() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             boolean hasScan = ActivityCompat.checkSelfPermission(getContext(), Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED;
             boolean hasConnect = ActivityCompat.checkSelfPermission(getContext(), Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED;
@@ -106,7 +106,7 @@ public class BluetoothSppPlugin extends Plugin {
             return;
         }
 
-        if (!hasRequiredPermissions()) {
+        if (!checkBluetoothPermissions()) {
             requestPermissionForAlias("bluetooth", call, "discoveryPermsCallback");
             return;
         }
@@ -116,7 +116,7 @@ public class BluetoothSppPlugin extends Plugin {
 
     @PermissionCallback
     private void discoveryPermsCallback(PluginCall call) {
-        if (hasRequiredPermissions()) {
+        if (checkBluetoothPermissions()) {
             executeStartDiscovery(call);
         } else {
             Log.e(TAG, "[BT-SCAN] Bluetooth permissions denied by user");
@@ -249,7 +249,7 @@ public class BluetoothSppPlugin extends Plugin {
             return;
         }
 
-        if (!hasRequiredPermissions()) {
+        if (!checkBluetoothPermissions()) {
             requestPermissionForAlias("bluetooth", call, "pairedPermsCallback");
             return;
         }
@@ -259,7 +259,7 @@ public class BluetoothSppPlugin extends Plugin {
 
     @PermissionCallback
     private void pairedPermsCallback(PluginCall call) {
-        if (hasRequiredPermissions()) {
+        if (checkBluetoothPermissions()) {
             executeGetPairedDevices(call);
         } else {
             call.reject("Bluetooth permission denied by user.");
@@ -304,7 +304,7 @@ public class BluetoothSppPlugin extends Plugin {
             return;
         }
 
-        if (!hasRequiredPermissions()) {
+        if (!checkBluetoothPermissions()) {
             requestPermissionForAlias("bluetooth", call, "connectPermsCallback");
             return;
         }
@@ -315,7 +315,7 @@ public class BluetoothSppPlugin extends Plugin {
     @PermissionCallback
     private void connectPermsCallback(PluginCall call) {
         String address = call.getString("address");
-        if (address != null && hasRequiredPermissions()) {
+        if (address != null && checkBluetoothPermissions()) {
             executeConnect(call, address.trim().toUpperCase());
         } else {
             Log.e(TAG, "[BT-CONNECT] FAILED error=Permission denied (BLUETOOTH_CONNECT)");
