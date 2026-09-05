@@ -135,14 +135,18 @@ export class TransportManager {
             payloadStart = data.slice(2, 4);
           }
           
-          if (payloadStart.length >= 2) {
+          if (payloadStart.length >= 1) {
             const expectedMode = req.requestBytes[0] + 0x40;
-            const expectedPid = req.requestBytes[1];
-            if (payloadStart[0] !== expectedMode || payloadStart[1] !== expectedPid) {
-               // Only ignore if it's a positive response but for a different PID
-               // Negative responses (0x7F) are handled inside resolve/parsing if needed
+            const hasPid = req.requestBytes.length >= 2;
+            const expectedPid = hasPid ? req.requestBytes[1] : null;
+            
+            const modeMatch = payloadStart[0] === expectedMode;
+            const pidMatch = !hasPid || (payloadStart.length >= 2 && payloadStart[1] === expectedPid);
+
+            if (!modeMatch || !pidMatch) {
+               // Only ignore if it's a positive response but for a different PID/Mode
                if (payloadStart[0] !== 0x7F) {
-                 console.warn(`[TM-CAN-RX] Mismatched PID: Expected 0x${expectedMode.toString(16)} 0x${expectedPid.toString(16)}, got 0x${payloadStart[0].toString(16)} 0x${payloadStart[1].toString(16)}. Ignoring frame.`);
+                 console.warn(`[TM-CAN-RX] Mismatched Response: Expected Mode 0x${expectedMode.toString(16)}${hasPid ? ` PID 0x${expectedPid!.toString(16)}` : ''}, got 0x${payloadStart[0].toString(16)}${payloadStart.length >= 2 ? ` 0x${payloadStart[1].toString(16)}` : ''}. Ignoring frame.`);
                  continue;
                }
             }
