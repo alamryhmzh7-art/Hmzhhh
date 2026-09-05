@@ -21,6 +21,7 @@ interface PendingDiagnosticRequest {
   resolve: (data: number[]) => void;
   reject: (err: Error) => void;
   canId: number;
+  requestBytes: number[];
   expectedResponseId?: number;
   actualResponseId?: number;
   timer: any;
@@ -123,6 +124,30 @@ export class TransportManager {
         }
 
         const pciType = data[0] & 0xF0;
+
+        // Strict PID matching check for the start of a multi-frame or a single frame
+        // Point 10: If we expect 41 0C but get 41 0D, it's NOT a match for this request.
+        if (!req.isoTpBuffer) {
+          let payloadStart: number[] = [];
+          if (pciType === 0x00) {
+            payloadStart = data.slice(1, 3);
+          } else if (pciType === 0x10) {
+            payloadStart = data.slice(2, 4);
+          }
+          
+          if (payloadStart.length >= 2) {
+            const expectedMode = req.requestBytes[0] + 0x40;
+            const expectedPid = req.requestBytes[1];
+            if (payloadStart[0] !== expectedMode || payloadStart[1] !== expectedPid) {
+               // Only ignore if it's a positive response but for a different PID
+               // Negative responses (0x7F) are handled inside resolve/parsing if needed
+               if (payloadStart[0] !== 0x7F) {
+                 console.warn(`[TM-CAN-RX] Mismatched PID: Expected 0x${expectedMode.toString(16)} 0x${expectedPid.toString(16)}, got 0x${payloadStart[0].toString(16)} 0x${payloadStart[1].toString(16)}. Ignoring frame.`);
+                 continue;
+               }
+            }
+          }
+        }
 
         // Strict ISO-TP State Machine
         if (req.isoTpBuffer) {
@@ -553,6 +578,7 @@ export class TransportManager {
               resolve: interceptedResolve, 
               reject, 
               canId: numCanId, 
+              requestBytes: [...requestBytes],
               isExtended, 
               correlationId, 
               timer 

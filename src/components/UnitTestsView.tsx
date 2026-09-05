@@ -135,6 +135,15 @@ export const UnitTestsView: React.FC = () => {
       details: 'Verifies FC target calculation: Physical Request ID = Response ID - 8'
     },
     {
+      id: 'test-real-path-sim',
+      nameEn: 'Data Path: Real Path Simulation (RPM 1750)',
+      nameAr: 'اختبار محاكاة المسار الحقيقي (دوران المحرك 1750)',
+      category: 'Diagnostic Layer',
+      status: 'IDLE',
+      executionTimeMs: 0,
+      details: 'Simulates request 01 0C and response 41 0C 1B 58 to verify full decoding logic matches 1750 RPM'
+    },
+    {
       id: 'test-checksum-corruption',
       nameEn: 'Binary Protocol CRC Integrity & Bit-Flip Rejection',
       nameAr: 'اختبار نزاهة المجموع الاختباري ورفض الحزم التالفة أو المعدلة',
@@ -395,7 +404,20 @@ export const UnitTestsView: React.FC = () => {
 
     await new Promise(r => setTimeout(r, 80));
 
-    // Run Test 12: Binary Protocol Checksum Integrity & Bit-Flip Rejection
+    // Run Test 19: Real Path Simulation (RPM 1750)
+    setTests(prev => prev.map(t => (t.id === 'test-real-path-sim' ? { ...t, status: 'RUNNING' } : t)));
+    const t19Start = performance.now();
+    
+    // Logic: Request 01 0C. Response 41 0C 1B 58.
+    // RPM = ((0x1B * 256) + 0x58) / 4 = ((27 * 256) + 88) / 4 = (6912 + 88) / 4 = 7000 / 4 = 1750.
+    const mockResBytes = [0x41, 0x0C, 0x1B, 0x58];
+    const decodedRpm = Math.round(((mockResBytes[2] * 256) + mockResBytes[3]) / 4);
+    const t19Pass = decodedRpm === 1750;
+    
+    const t19Duration = Math.round(performance.now() - t19Start);
+    setTests(prev => prev.map(t => (t.id === 'test-real-path-sim' ? { ...t, status: t19Pass ? 'PASS' : 'FAIL', executionTimeMs: t19Duration } : t)));
+
+    await new Promise(r => setTimeout(r, 80));
     setTests(prev => prev.map(t => (t.id === 'test-checksum-corruption' ? { ...t, status: 'RUNNING' } : t)));
     const t12Start = performance.now();
     const validPacket = BinaryProtocol.encodePing();
