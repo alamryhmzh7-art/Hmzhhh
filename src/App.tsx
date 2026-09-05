@@ -23,6 +23,7 @@ import { OtaView } from './components/OtaView';
 import { AndroidProjectView } from './components/AndroidProjectView';
 import { UnitTestsView } from './components/UnitTestsView';
 import { SettingsView } from './components/SettingsView';
+import { DiagnosticAuditView } from './components/DiagnosticAuditView';
 import { 
   Gauge, 
   Activity, 
@@ -40,7 +41,8 @@ import {
   UploadCloud, 
   Smartphone, 
   CheckCircle2,
-  Bug
+  Bug,
+  ClipboardCheck
 } from 'lucide-react';
 
 const MainApp: React.FC = () => {
@@ -226,6 +228,7 @@ const MainApp: React.FC = () => {
     { id: 'ota', label: t('tabOta'), icon: UploadCloud },
     { id: 'androidCode', label: t('tabAndroidCode'), icon: Smartphone },
     { id: 'unitTests', label: t('tabUnitTests'), icon: CheckCircle2 },
+    { id: 'audit', label: isRtl ? 'تدقيق النظام' : 'System Audit', icon: ClipboardCheck },
     { id: 'settings', label: t('tabSettings'), icon: Settings }
   ];
 
@@ -376,6 +379,10 @@ const MainApp: React.FC = () => {
 
         {activeTab === 'unitTests' && (
           <UnitTestsView />
+        )}
+
+        {activeTab === 'audit' && (
+          <DiagnosticAuditView status={status} />
         )}
 
         {activeTab === 'settings' && (

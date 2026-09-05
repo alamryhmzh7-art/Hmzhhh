@@ -325,6 +325,12 @@ void handleParsedCommand(uint8_t cmd, uint16_t len, const uint8_t* payload, bool
         esp_err_t err = twai_transmit(&txMsg, pdMS_TO_TICKS(20));
         if (err == ESP_OK) {
           stats.messagesSent++;
+          // Log TX for debugging
+          Serial.printf("[ESP32-CAN-TX] ID=0x%X DLC=%d DATA=", txMsg.identifier, txMsg.data_length_code);
+          for (int i = 0; i < txMsg.data_length_code; i++) {
+            Serial.printf("%02X ", txMsg.data[i]);
+          }
+          Serial.println();
         } else {
           stats.txErrorCount++;
           // Auto-recovery for bus off or stopped state

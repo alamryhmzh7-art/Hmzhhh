@@ -614,27 +614,33 @@ export class TransportManager {
     }
 
     try {
-      // ISO-TP Framing Logic
+      // IMPROVED ISO-TP Framing Logic
       let canPayload: number[];
       let multiFrameTx = false;
       let remainingTxBytes: number[] = [];
 
-      // PROTECTION: If user passed 8 bytes and first byte is 0-7, it's probably already an ISO-TP SF.
-      // We should NOT wrap it again.
-      if (requestBytes.length === 8 && requestBytes[0] <= 0x07) {
-        console.log(`[OBD-TX] [${correlationId}] Detected already-formatted ISO-TP Single Frame. Bypassing auto-wrap.`);
+      // 1. Detection: If user passed 8 bytes and first byte is 0-7, it's definitely a pre-formatted SF.
+      // 2. Detection: If length is < 8, but requestBytes[0] matches the data length, it might be pre-formatted.
+      const alreadyHasPci = (requestBytes.length === 8 && requestBytes[0] <= 0x07) || 
+                            (requestBytes.length > 1 && requestBytes.length <= 8 && requestBytes[0] === requestBytes.length - 1);
+
+      if (alreadyHasPci) {
+        console.log(`[OBD-TX] [${correlationId}] Detected pre-formatted ISO-TP Frame. Bypassing auto-wrap.`);
         canPayload = [...requestBytes];
+        while (canPayload.length < 8) canPayload.push(0x00);
       } else if (requestBytes.length <= 7) {
-        // Single Frame (SF)
+        // Single Frame (SF) - Standard OBD/UDS Auto-wrap
         canPayload = [requestBytes.length, ...requestBytes];
         while (canPayload.length < 8) canPayload.push(0x00);
       } else {
         // Multi-frame request initialization (ISO-TP First Frame)
         multiFrameTx = true;
-        // ISO-TP First Frame: PCI(2B) + Payload(6B)
-        canPayload = [0x10 | ((requestBytes.length >> 8) & 0x0F), requestBytes.length & 0xFF, ...requestBytes.slice(0, 6)];
+        // ISO-TP First Frame: PCI(1B: 0x10 | high nibble of length) + Len(1B: low byte of length)
+        // Standard ISO-TP: [1][LLL] [LL] ...
+        const len = requestBytes.length;
+        canPayload = [0x10 | ((len >> 8) & 0x0F), len & 0xFF, ...requestBytes.slice(0, 6)];
         remainingTxBytes = requestBytes.slice(6);
-        console.log(`[ISO-TP-TX] [${correlationId}] Initiating Multi-frame TX (Total Len: ${requestBytes.length})`);
+        console.log(`[ISO-TP-TX] [${correlationId}] Initiating Multi-frame TX (Total Len: ${len})`);
       }
 
       const seq = ++this.sequenceId;

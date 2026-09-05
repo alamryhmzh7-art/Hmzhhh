@@ -472,6 +472,29 @@ export const Dashboard: React.FC<DashboardProps> = ({
               </p>
             </div>
           </button>
+
+          {/* 13. System Audit (Proof-Audit) */}
+          <button
+            onClick={() => onNavigate('audit')}
+            className="group p-4 rounded-xl bg-gradient-to-br from-indigo-900/20 to-purple-900/20 hover:from-indigo-900/30 hover:to-purple-900/30 border border-indigo-500/30 hover:border-indigo-400/60 transition-all text-left flex flex-col justify-between shadow-lg shadow-indigo-950/40"
+          >
+            <div className="flex items-center justify-between w-full">
+              <div className="h-11 w-11 rounded-lg bg-indigo-500/20 border border-indigo-400/40 flex items-center justify-center text-indigo-400 group-hover:scale-105 transition-transform">
+                <ShieldCheck className="h-6 w-6" />
+              </div>
+              <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-indigo-950 text-indigo-300 border border-indigo-800 font-bold">
+                Proof
+              </span>
+            </div>
+            <div className="mt-4">
+              <h3 className="font-bold text-base text-white group-hover:text-indigo-300 transition-colors">
+                {isRtl ? 'تدقيق النظام' : 'System Audit'}
+              </h3>
+              <p className="text-xs text-slate-400 mt-0.5">
+                End-to-End Layer Proof
+              </p>
+            </div>
+          </button>
         </div>
       </div>
     </div>

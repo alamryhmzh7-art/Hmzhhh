@@ -79,6 +79,7 @@ export type ViewTab =
   | 'reports'
   | 'commLog'
   | 'errorLog'
+  | 'audit'
   | 'devMode'
   | 'ota'
   | 'androidCode'
