@@ -74,6 +74,7 @@ export class TransportManager {
       for (const seq in this.pendingRequests) {
         const req = this.pendingRequests[seq];
         const expectedResponseId = req.canId + 8;
+        
         // Strict matching: 0x7DF matches any ECU response 0x7E8-0x7EF; targeted IDs match exact req.canId + 8
         const isMatch = (req.canId === 0x7DF && frameIdNum >= 0x7E8 && frameIdNum <= 0x7EF) ||
                         (frameIdNum === expectedResponseId);
@@ -87,10 +88,12 @@ export class TransportManager {
         // Case 1: ISO-TP Single Frame (0x00 - 0x0F)
         if (pciType === 0x00) {
           const sfLength = data[0] & 0x0F;
+          // In some implementations, if len is 0, byte 1 might be the length (ISO 15765-2:2016)
+          // but for standard OBD, byte 0 [0:3] is length.
           const payload = (sfLength > 0 && sfLength <= 7) ? data.slice(1, 1 + sfLength) : data.slice(1);
           clearTimeout(req.timer);
           delete this.pendingRequests[seq];
-          console.log(`[CAN-RX] [${req.correlationId}] Single Frame from 0x${frameIdNum.toString(16).toUpperCase()}: Payload=[${payload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
+          console.log(`[ISO-TP] [${req.correlationId}] Single Frame from 0x${frameIdNum.toString(16).toUpperCase()}: Payload=[${payload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
           req.resolve(payload);
           break;
         }
@@ -104,14 +107,21 @@ export class TransportManager {
             receivedBytes: [...initialBytes],
             expectedSequence: 1
           };
-          console.log(`[CAN-RX] [${req.correlationId}] First Frame from 0x${frameIdNum.toString(16).toUpperCase()}: TotalLen=${totalLength}, InitialBytes=${initialBytes.length}`);
+          console.log(`[ISO-TP] [${req.correlationId}] First Frame from 0x${frameIdNum.toString(16).toUpperCase()}: TotalLen=${totalLength}`);
 
-          // Send ISO-TP Flow Control (FC) frame back to ECU
+          /**
+           * Determine Flow Control (FC) Target ID:
+           * If we sent to 0x7DF and got response from 0x7E8, FC must go to 0x7E0.
+           * Rule: Physical Request ID = Response ID - 8
+           */
+          const fcTargetId = frameIdNum - 8;
           const fcFrame = [0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-          this.activeTransport.sendCanFrame(req.canId, fcFrame, req.isExtended).catch(err => {
-            console.error(`[CAN-TX] [${req.correlationId}] Failed to send Flow Control:`, err);
+          
+          this.activeTransport.sendCanFrame(fcTargetId, fcFrame, req.isExtended).then(() => {
+            console.log(`[ISO-TP] [${req.correlationId}] Sent Flow Control (FC) to 0x${fcTargetId.toString(16).toUpperCase()}`);
+          }).catch(err => {
+            console.error(`[ISO-TP] [${req.correlationId}] Failed to send Flow Control:`, err);
           });
-          console.log(`[CAN-TX] [${req.correlationId}] Sent Flow Control (FC) to 0x${req.canId.toString(16).toUpperCase()}`);
           break;
         }
 
@@ -130,20 +140,25 @@ export class TransportManager {
               const fullPayload = [...req.isoTpBuffer.receivedBytes];
               clearTimeout(req.timer);
               delete this.pendingRequests[seq];
-              console.log(`[CAN-RX] [${req.correlationId}] Multi-frame complete (${fullPayload.length} bytes): Payload=[${fullPayload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
+              console.log(`[ISO-TP] [${req.correlationId}] Multi-frame complete (${fullPayload.length} bytes)`);
               req.resolve(fullPayload);
             }
           } else {
-            console.warn(`[CAN-RX] [${req.correlationId}] ISO-TP Sequence mismatch: expected ${req.isoTpBuffer.expectedSequence}, got ${seqNum}`);
+            console.warn(`[ISO-TP] [${req.correlationId}] Sequence mismatch: expected ${req.isoTpBuffer.expectedSequence}, got ${seqNum}`);
+            // In a real implementation, we might send an error or abort, but here we just wait or timeout
           }
           break;
         }
 
-        // Case 4: Non-ISO-TP raw frame fallback
-        clearTimeout(req.timer);
-        delete this.pendingRequests[seq];
-        req.resolve(data);
-        break;
+        // Case 4: Non-ISO-TP or unhandled frame
+        // If we were expecting ISO-TP but got something else on the same ID, decide if we resolve it
+        if (!req.isoTpBuffer) {
+          clearTimeout(req.timer);
+          delete this.pendingRequests[seq];
+          console.log(`[CAN-RX] [${req.correlationId}] Raw Frame from 0x${frameIdNum.toString(16).toUpperCase()}: [${data.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
+          req.resolve(data);
+          break;
+        }
       }
     };
     this.wifiTransport.onCanFrame(handleCanFrame);
@@ -296,20 +311,25 @@ export class TransportManager {
   /**
    * Unified Request / Response dispatcher with strict Real Mode vs Demo Mode enforcement
    */
-  public async sendRequest(requestBytes: number[], targetCanId: string = '0x7E0'): Promise<CommunicationPacket> {
+  public async sendRequest(requestBytes: number[], targetCanId: string = '0x7DF'): Promise<CommunicationPacket> {
     this.sequenceId++;
     const startTime = performance.now();
     const reqHex = requestBytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
-    const numCanId = parseInt(targetCanId.replace('0x', ''), 16) || 0x7E0;
+    const numCanId = parseInt(targetCanId.replace('0x', ''), 16) || 0x7DF;
     const isExtended = targetCanId.length > 5;
-    const correlationId = `CORR-${this.sequenceId}-${Date.now()}`;
-    const transportPrefix = this.activeTransport.type === 'BLUETOOTH_SPP' ? '[BT TX]' : '[WiFi TX]';
-    const rxPrefix = this.activeTransport.type === 'BLUETOOTH_SPP' ? '[BT RX]' : '[WiFi RX]';
+    const correlationId = `OBD-${this.sequenceId}`;
+    
+    // Logging prefixes as requested
+    const txLogPrefix = '[CAN-TX]';
+    const rxLogPrefix = '[CAN-RX]';
+    const obdPrefix = '[OBD]';
+
+    console.log(`${obdPrefix} [${correlationId}] REQ TO ${targetCanId}: [${reqHex}]`);
 
     // In REAL MODE: verify physical connection
     if (!this.isConnected() && !this.config.isMockMode) {
       const errPkt = commLogger.logPacket({
-        direction: rxPrefix,
+        direction: '[OBD RX]',
         protocol: this.config.protocol,
         canIdHex: targetCanId,
         requestRaw: reqHex,
@@ -341,7 +361,7 @@ export class TransportManager {
         canPayload = [...requestBytes];
       }
 
-      console.log(`[DIAG-REQ] [${correlationId}] CAN ID=0x${numCanId.toString(16).toUpperCase()} DATA=[${canPayload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
+      console.log(`${txLogPrefix} [${correlationId}] ID=0x${numCanId.toString(16).toUpperCase()} DATA=[${canPayload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
 
       if (this.config.isMockMode) {
         // Send through active transport mock pipeline
@@ -354,12 +374,13 @@ export class TransportManager {
         // Real hardware send
         const ok = await this.activeTransport.sendCanFrame(numCanId, canPayload, isExtended);
         if (!ok) throw new Error('Failed to send packet over transport');
-        // Real response is picked up via stream listeners
+        
+        // Real response is picked up via stream listeners (ISO-TP reassembly handled in constructor)
         const seq = this.sequenceId;
         responseBytes = await new Promise<number[]>((resolve, reject) => {
            const timer = setTimeout(() => {
               delete this.pendingRequests[seq];
-              console.warn(`[DIAG-TIMEOUT] [${correlationId}] No CAN response from ECU on 0x${numCanId.toString(16).toUpperCase()}`);
+              console.warn(`[OBD] [${correlationId}] TIMEOUT waiting for ECU response on 0x${numCanId.toString(16).toUpperCase()}`);
               reject(new Error('TIMEOUT_WAITING_FOR_ECU_RESPONSE'));
            }, 2500);
            this.pendingRequests[seq] = { resolve, reject, canId: numCanId, isExtended, correlationId, timer };
@@ -369,10 +390,11 @@ export class TransportManager {
       const durationMs = Math.round(performance.now() - startTime);
       const resHex = responseBytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
       const parsed = PacketParser.parse(responseBytes);
-      console.log(`[DIAG-RESP] [${correlationId}] Latency=${durationMs}ms Status=${responseBytes[0] === 0x7F ? 'NRC' : 'SUCCESS'} DATA=[${resHex}]`);
+      
+      console.log(`${obdPrefix} [${correlationId}] RESP FROM ECU: [${resHex}] (${durationMs}ms)`);
 
       const respPkt = commLogger.logPacket({
-        direction: rxPrefix,
+        direction: '[OBD RX]',
         protocol: this.config.protocol,
         canIdHex: (numCanId === 0x7DF || numCanId === 0x7E0) ? '0x7E8' : '0x7E9',
         requestRaw: reqHex,
@@ -385,9 +407,9 @@ export class TransportManager {
       return respPkt;
     } catch (err: any) {
       const durationMs = Math.round(performance.now() - startTime);
-      console.warn(`[DIAG-FAIL] [${correlationId}] Error: ${err?.message || 'Response Timeout'}`);
+      console.warn(`[OBD-FAIL] [${correlationId}] Error: ${err?.message || 'Response Timeout'}`);
       const errPkt = commLogger.logPacket({
-        direction: rxPrefix,
+        direction: '[OBD RX]',
         protocol: this.config.protocol,
         canIdHex: targetCanId,
         requestRaw: reqHex,

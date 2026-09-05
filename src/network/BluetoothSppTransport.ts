@@ -536,15 +536,10 @@ export class BluetoothSppTransport implements ITransport {
     }
     
     // In Capacitor, we can add a listener on the plugin object
-    // Wait, the plugin needs an addListener method if it returns an event.
-    // get capacitor core PluginListenerHandle
     this.nativeListener = await (BluetoothSpp as any).addListener('onBluetoothData', (info: any) => {
        if (info && info.data) {
           const byteArr = new Uint8Array(info.data);
-          // Only log for debug in physical testing
-          // const hex = Array.from(byteArr).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
-          // console.log(`[BT-NATIVE] RX BYTES: ${hex}`);
-          this.handleIncomingData(byteArr.buffer);
+          this.handleIncomingData(byteArr);
        }
     });
 
