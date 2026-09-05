@@ -215,6 +215,10 @@ export class TransportManager {
     }
   }
 
+  public getConfig(): ConnectionConfig {
+    return this.config;
+  }
+
   public async connect(config?: Partial<ConnectionConfig>): Promise<boolean> {
     return this.activeTransport.connect(config);
   }
@@ -627,8 +631,9 @@ export class TransportManager {
       } else {
         // Multi-frame request initialization (ISO-TP First Frame)
         multiFrameTx = true;
-        canPayload = [0x10, (requestBytes.length >> 8) & 0x0F, requestBytes.length & 0xFF, ...requestBytes.slice(0, 5)];
-        remainingTxBytes = requestBytes.slice(5);
+        // ISO-TP First Frame: PCI(2B) + Payload(6B)
+        canPayload = [0x10 | ((requestBytes.length >> 8) & 0x0F), requestBytes.length & 0xFF, ...requestBytes.slice(0, 6)];
+        remainingTxBytes = requestBytes.slice(6);
         console.log(`[ISO-TP-TX] [${correlationId}] Initiating Multi-frame TX (Total Len: ${requestBytes.length})`);
       }
 
@@ -640,14 +645,14 @@ export class TransportManager {
         const timer = setTimeout(() => {
           this.cleanupRequest(seq);
           const expectedIdHex = (numCanId === 0x7DF) ? '0x7E8-0x7EF' : '0x' + (numCanId + 8).toString(16).toUpperCase();
-          console.warn(`[OBD-TIMEOUT] [${correlationId}] NO RESPONSE from ECU. Expected ID: ${expectedIdIdHex} Request: ${reqHex}`);
+          console.warn(`[OBD-TIMEOUT] [${correlationId}] NO RESPONSE from ECU. Expected ID: ${expectedIdHex} Request: ${reqHex}`);
           
           commLogger.logPacket({
             direction: '[OBD-TIMEOUT]',
             protocol: this.config.protocol,
             canIdHex: `0x${numCanId.toString(16).toUpperCase()}`,
             requestRaw: reqHex,
-            error: `TIMEOUT: No response from ${expectedIdIdHex}`,
+            error: `TIMEOUT: No response from ${expectedIdHex}`,
             durationMs: timeoutMs,
             status: 'TIMEOUT'
           });
@@ -690,8 +695,16 @@ export class TransportManager {
         description: multiFrameTx ? 'ISO-TP First Frame' : 'ISO-TP Single Frame'
       });
 
+      const ok = await this.activeTransport.sendCanFrame(numCanId, canPayload, isExtended);
+      if (!ok) {
+        this.cleanupRequest(seq);
+        console.error(`[CAN-TX] [${correlationId}] FAILED to send to transport`);
+        throw new Error('Failed to send packet over transport');
+      }
+
+      // Log success ONLY when sent to transport successfully
       commLogger.logPacket({
-        direction: '[TX]',
+        direction: '[CAN-TX]',
         protocol: this.config.protocol,
         canIdHex: `0x${numCanId.toString(16).toUpperCase()}`,
         dlc: canPayload.length,
@@ -699,13 +712,6 @@ export class TransportManager {
         durationMs: 0,
         status: 'SUCCESS'
       });
-
-      const ok = await this.activeTransport.sendCanFrame(numCanId, canPayload, isExtended);
-      if (!ok) {
-        this.cleanupRequest(seq);
-        console.error(`[CAN-TX] [${correlationId}] FAILED to send to transport`);
-        throw new Error('Failed to send packet over transport');
-      }
 
       console.log(`[CAN-TX] [${correlationId}] SENT SUCCESS: ID=0x${numCanId.toString(16).toUpperCase()} DATA=[${canPayload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
 

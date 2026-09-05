@@ -39,9 +39,9 @@ export class ReportGenerator {
 
     doc.setFontSize(10);
     doc.text(`Vehicle: ${data.vehicleName}`, 20, 62);
-    doc.text(`VIN: ${data.vinInfo?.rawVin || '4T1BF1FK5NU123456'}`, 20, 69);
-    doc.text(`Manufacturer: ${data.vinInfo?.manufacturer || 'Toyota Motor Corp'}`, 110, 62);
-    doc.text(`Model Year: ${data.vinInfo?.year || '2022'}`, 110, 69);
+    doc.text(`VIN: ${data.vinInfo?.rawVin || 'Not Read'}`, 20, 69);
+    doc.text(`Manufacturer: ${data.vinInfo?.manufacturer || 'Unknown'}`, 110, 62);
+    doc.text(`Model Year: ${data.vinInfo?.year || 'Unknown'}`, 110, 69);
 
     // DTC Section
     const dtcList = data.dtcList || [];
@@ -128,9 +128,9 @@ export class ReportGenerator {
       },
       vehicleContext: {
         name: vehicleName,
-        vin: vin || '4T1BF1FK5NU123456',
-        ecuCount: 9,
-        batteryVoltage: 14.15
+        vin: vin || 'Not Read',
+        ecuCount: 0,
+        batteryVoltage: 0.0
       },
       errorLogs: errorLogRepo.getLogs(),
       communicationPackets: commLogger.getPackets(),

@@ -41,8 +41,12 @@ interface DashboardProps {
 export const Dashboard: React.FC<DashboardProps> = ({
   status = 'DISCONNECTED',
   config = {
+    transportType: 'WIFI_TCP',
     ip: '192.168.4.1',
     port: 35000,
+    bluetoothDeviceName: 'ESP32-OBD-PRO',
+    bluetoothMacAddress: '',
+    bluetoothSppUuid: '00001101-0000-1000-8000-00805F9B34FB',
     connectionTimeoutMs: 4000,
     responseTimeoutMs: 2500,
     canSpeed: '500K',
@@ -53,16 +57,16 @@ export const Dashboard: React.FC<DashboardProps> = ({
   },
   isCarLinked = false,
   vinInfo = {
-    rawVin: '4T1BF1FK5NU123456',
-    isValid: true,
-    manufacturer: 'Toyota',
-    model: 'Camry',
-    year: 2022,
-    country: 'United States'
+    rawVin: '',
+    isValid: false,
+    manufacturer: 'Unknown',
+    model: 'Unknown',
+    year: undefined,
+    country: 'Unknown'
   },
   dtcList = [],
   ecuList = [],
-  batteryVoltage = 14.15,
+  batteryVoltage = 0.0,
   dtcCount,
   vin,
   onNavigate = (_tab: ViewTab) => {},
@@ -145,10 +149,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <Car className="h-4 w-4 text-purple-400" />
           </div>
           <div className="mt-2 font-bold text-sm text-slate-200 truncate">
-            {vinInfo.isValid ? `${vinInfo.manufacturer} ${vinInfo.model}` : 'Toyota Camry (2022)'}
+            {vinInfo.isValid ? `${vinInfo.manufacturer} ${vinInfo.model}` : 'Unknown'}
           </div>
           <div className="mt-2 text-[11px] text-slate-400 font-mono tracking-wider truncate">
-            {vinInfo.rawVin || '4T1BF1FK5NU123456'}
+            {vinInfo.rawVin || 'Not Read'}
           </div>
         </div>
 

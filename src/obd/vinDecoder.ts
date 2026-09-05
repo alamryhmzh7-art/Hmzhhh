@@ -64,16 +64,15 @@ export class VinDecoder {
       country: wmi.startsWith('J') ? 'Japan' : wmi.startsWith('K') ? 'South Korea' : wmi.startsWith('W') ? 'Germany' : 'United States'
     };
 
-    const year = this.YEAR_CODES[yearChar] || 2022;
+    const year = this.YEAR_CODES[yearChar] || undefined;
 
     // Detect model approximation if Toyota/Lexus/etc.
-    let model = 'Sedan / SUV';
+    let model = 'Unknown Model';
     if (wmi.startsWith('JT') || wmi === '4T1' || wmi === '4T3') {
       if (vds.startsWith('BK') || vds.startsWith('BF')) model = 'Camry';
       else if (vds.startsWith('BU') || vds.startsWith('BE')) model = 'Corolla';
       else if (vds.startsWith('ZA') || vds.startsWith('HY')) model = 'ES350';
       else if (vds.startsWith('GS') || vds.startsWith('UR')) model = 'Land Cruiser';
-      else model = 'Camry';
     }
 
     return {
@@ -87,7 +86,6 @@ export class VinDecoder {
       plant: `Plant ${plant}`,
       sequentialNumber: sequential,
       country: wmiInfo.country,
-      engineType: '2.5L Dynamic Force 4-Cylinder (A25A-FKS)',
       isValid: true
     };
   }

@@ -32,7 +32,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ status, vinInfo, dtcLi
 
   const handleGeneratePdf = () => {
     ReportGenerator.generatePdf({
-      vehicleName: vinInfo.isValid ? `${vinInfo.manufacturer} ${vinInfo.model}` : 'Toyota Camry (2022)',
+      vehicleName: vinInfo.isValid ? `${vinInfo.manufacturer} ${vinInfo.model}` : 'Unknown Vehicle',
       vinInfo,
       dtcList,
       liveDataPids: standardPids,
@@ -44,7 +44,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ status, vinInfo, dtcLi
 
   const handleExportJson = () => {
     ReportGenerator.exportDiagnosticBundleJson(
-      vinInfo.isValid ? `${vinInfo.manufacturer} ${vinInfo.model}` : 'Toyota Camry (2022)',
+      vinInfo.isValid ? `${vinInfo.manufacturer} ${vinInfo.model}` : 'Unknown Vehicle',
       vinInfo.rawVin
     );
   };
@@ -160,19 +160,19 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ status, vinInfo, dtcLi
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-mono">
           <div>
             <span className="text-slate-500 block text-[10px]">VEHICLE</span>
-            <span className="text-white font-bold">{vinInfo.isValid ? `${vinInfo.manufacturer} ${vinInfo.model}` : 'Toyota Camry'}</span>
+            <span className="text-white font-bold">{vinInfo.isValid ? `${vinInfo.manufacturer} ${vinInfo.model}` : 'Unknown Vehicle'}</span>
           </div>
           <div>
             <span className="text-slate-500 block text-[10px]">VIN NUMBER</span>
-            <span className="text-cyan-400 font-bold">{vinInfo.rawVin || '4T1BF1FK5NU123456'}</span>
+            <span className="text-cyan-400 font-bold">{vinInfo.rawVin || 'Not Read'}</span>
           </div>
           <div>
             <span className="text-slate-500 block text-[10px]">MODEL YEAR</span>
-            <span className="text-slate-200 font-bold">{vinInfo.year || '2022'}</span>
+            <span className="text-slate-200 font-bold">{vinInfo.year || 'Unknown'}</span>
           </div>
           <div>
             <span className="text-slate-500 block text-[10px]">COUNTRY</span>
-            <span className="text-slate-200 font-bold">{vinInfo.country || 'USA'}</span>
+            <span className="text-slate-200 font-bold">{vinInfo.country || 'Unknown'}</span>
           </div>
         </div>
 
