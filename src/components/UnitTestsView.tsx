@@ -106,6 +106,24 @@ export const UnitTestsView: React.FC = () => {
       status: 'IDLE',
       executionTimeMs: 0,
       details: 'Verifies parity of 100% of translation dictionary keys between AR and EN'
+    },
+    {
+      id: 'test-binary-stream-partial',
+      nameEn: 'Binary Stream Partial Chunk & Fragmentation Resiliency',
+      nameAr: 'اختبار صمود معالج التدفق الثنائي أمام تجزئة الحزم وتأخر البايتات',
+      category: 'Binary Transport Protocol',
+      status: 'IDLE',
+      executionTimeMs: 0,
+      details: 'Verifies that chunked partial frames are held intact in the ring buffer until subsequent bytes arrive'
+    },
+    {
+      id: 'test-real-mode-rejection',
+      nameEn: 'Real Mode Strict Mock Isolation & Disconnection Guard',
+      nameAr: 'اختبار عزل الوضع الحقيقي وحظر توليد بيانات أو أعطال وهمية عند انقطاع الاتصال',
+      category: 'Hardware Safety & Architecture',
+      status: 'IDLE',
+      executionTimeMs: 0,
+      details: 'Asserts that disconnected Real Mode strictly returns TIMEOUT/ERROR and never falls back to mock ECU data'
     }
   ]);
   const [isRunningAll, setIsRunningAll] = useState<boolean>(false);
@@ -200,6 +218,43 @@ export const UnitTestsView: React.FC = () => {
     const t8Pass = arKeys.length === enKeys.length && arKeys.length > 30;
     const t8Duration = Math.round(performance.now() - t8Start);
     setTests(prev => prev.map(t => t.id === 'test-i18n' ? { ...t, status: t8Pass ? 'PASS' : 'FAIL', executionTimeMs: t8Duration } : t));
+
+    await new Promise(r => setTimeout(r, 80));
+
+    // Run Test 9: Binary Stream Partial Chunk Resiliency
+    setTests(prev => prev.map(t => t.id === 'test-binary-stream-partial' ? { ...t, status: 'RUNNING' } : t));
+    const t9Start = performance.now();
+    const fullCanPacket = BinaryProtocol.encodeCanFrame(0x7E8, [0x04, 0x41, 0x0C, 0x1F, 0x40], false);
+    // Split into 2 chunks
+    const chunk1 = fullCanPacket.slice(0, 6); // Just header and partial payload
+    const chunk2 = fullCanPacket.slice(6);    // Rest of payload and trailer
+    const parseRes1 = BinaryProtocol.parseStream(chunk1);
+    // Merge remainder with chunk2
+    const mergedChunk = new Uint8Array(parseRes1.remainingBuffer.length + chunk2.length);
+    mergedChunk.set(parseRes1.remainingBuffer, 0);
+    mergedChunk.set(chunk2, parseRes1.remainingBuffer.length);
+    const parseRes2 = BinaryProtocol.parseStream(mergedChunk);
+    const t9Pass = parseRes1.packets.length === 0 && parseRes1.remainingBuffer.length === 6 &&
+                   parseRes2.packets.length === 1 && parseRes2.remainingBuffer.length === 0 &&
+                   parseRes2.packets[0].canFrame?.id === '0x7E8';
+    const t9Duration = Math.round(performance.now() - t9Start);
+    setTests(prev => prev.map(t => t.id === 'test-binary-stream-partial' ? { ...t, status: t9Pass ? 'PASS' : 'FAIL', executionTimeMs: t9Duration } : t));
+
+    await new Promise(r => setTimeout(r, 80));
+
+    // Run Test 10: Real Mode Strict Mock Isolation
+    setTests(prev => prev.map(t => t.id === 'test-real-mode-rejection' ? { ...t, status: 'RUNNING' } : t));
+    const t10Start = performance.now();
+    const initialMockSetting = transportManager.getConfig().isMockMode;
+    // Set to real mode explicitly
+    transportManager.updateConfig({ isMockMode: false });
+    // Attempt request when disconnected - should reject or return ERROR
+    const reqRes = await transportManager.sendRequest([0x01, 0x0C], '0x7E0');
+    // Restore config
+    transportManager.updateConfig({ isMockMode: initialMockSetting });
+    const t10Pass = reqRes.status === 'ERROR' || reqRes.status === 'TIMEOUT';
+    const t10Duration = Math.round(performance.now() - t10Start);
+    setTests(prev => prev.map(t => t.id === 'test-real-mode-rejection' ? { ...t, status: t10Pass ? 'PASS' : 'FAIL', executionTimeMs: t10Duration } : t));
 
     setIsRunningAll(false);
   };
