@@ -136,7 +136,9 @@ export class AppLogger {
   public static redactSensitiveData(data: string | object): string {
     const str = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
     return str
-      .replace(/(password|passwd|pwd|token|secret|key)["']?\s*[:=]\s*["']?([^"',\s]+)/gi, '$1: [REDACTED_TOKEN]')
+      .replace(/(password|passwd|pwd|token|secret|key)["']?\s*[:= ]\s*["']?([^"',\s]+)/gi, (match, p1, p2) => {
+        return `${p1}: [REDACTED_TOKEN]`;
+      })
       .replace(/(\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b)/g, (match) => {
         if (match.startsWith('192.168.') || match === '127.0.0.1') return match;
         return 'xxx.xxx.xxx.xxx';

@@ -244,8 +244,32 @@ export class TransportManager {
     try {
       // 01 00 = OBD-II Mode 1, PID 00 (Supported PIDs 01-20)
       // This is a standard functional broadcast request.
-      const response = await this.sendRequest([0x01, 0x00], '0x7DF');
-      return response.status === 'SUCCESS' || response.status === 'NRC';
+      
+      // Try current config first
+      const is29Bit = this.config.canMode === '29-bit';
+      const targetId = is29Bit ? '0x18DB33F1' : '0x7DF';
+      
+      console.log(`[TM] Checking ECU Link using ${targetId} (${this.config.canMode})...`);
+      const response = await this.sendRequest([0x01, 0x00], targetId);
+      
+      if (response.status === 'SUCCESS' || response.status === 'NRC') {
+        console.log(`[TM] ECU Link SUCCESS with ${targetId}`);
+        return true;
+      }
+
+      // If failed and we are in AUTO/Unknown mode, try the other bit-width
+      const fallbackId = is29Bit ? '0x7DF' : '0x18DB33F1';
+      console.log(`[TM] ECU Link failed with ${targetId}. Trying fallback ${fallbackId}...`);
+      const fallbackResponse = await this.sendRequest([0x01, 0x00], fallbackId);
+
+      if (fallbackResponse.status === 'SUCCESS' || fallbackResponse.status === 'NRC') {
+        console.log(`[TM] ECU Link SUCCESS with fallback ${fallbackId}. Updating canMode...`);
+        // Optionally update config if fallback worked
+        this.updateConfig({ canMode: is29Bit ? '11-bit' : '29-bit' });
+        return true;
+      }
+      
+      return false;
     } catch (err) {
       console.warn('[TM] Car ECU link check failed:', err);
       return false;
