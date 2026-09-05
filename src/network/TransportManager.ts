@@ -182,7 +182,7 @@ export class TransportManager {
     };
     console.log(`[ISO-TP] [${req.correlationId}] First Frame from 0x${frameIdNum.toString(16).toUpperCase()}: TotalLen=${totalLength}`);
 
-    const fcTargetId = this.resolveIsoTpFlowControlId(req.canId, frameIdNum);
+    const fcTargetId = this.resolveIsoTpFlowControlId(req.canId, frameIdNum, req.isExtended);
     if (fcTargetId === null) {
       console.error(`[ISO-TP] [${req.correlationId}] FAILED to determine Flow Control ID for response 0x${frameIdNum.toString(16).toUpperCase()}. Aborting.`);
       clearTimeout(req.timer);
@@ -206,16 +206,26 @@ export class TransportManager {
   /**
    * Resolve Flow Control (FC) Target ID based on ISO 15765-2 rules
    */
-  public resolveIsoTpFlowControlId(requestCanId: number, responseCanId: number): number | null {
-    // Standard 11-bit OBD Physical Addressing (0x7E0-0x7E7 Request -> 0x7E8-0x7EF Response)
-    if (responseCanId >= 0x7E8 && responseCanId <= 0x7EF) {
-      if (requestCanId === 0x7DF) return responseCanId - 8;
-      if (requestCanId === responseCanId - 8) return requestCanId;
-    }
-
-    // Extended 29-bit Addressing (ISO 15765-2)
-    // Req: 18 DA [Target] [Source] | Res: 18 DA [Source] [Target]
-    if (requestCanId > 0x7FF && responseCanId > 0x7FF) {
+  public resolveIsoTpFlowControlId(requestCanId: number, responseCanId: number, isExtended: boolean): number | null {
+    if (!isExtended) {
+      // Standard 11-bit OBD Physical Addressing (0x7E0-0x7E7 Request -> 0x7E8-0x7EF Response)
+      if (responseCanId >= 0x7E8 && responseCanId <= 0x7EF) {
+        // Functional Discovery: 0x7DF Request -> Response 0x7E8..0x7EF
+        if (requestCanId === 0x7DF) {
+          // FC must go to the physical address of the responding ECU (Res - 8)
+          return responseCanId - 8;
+        }
+        // Physical Addressing: Request matches Response - 8
+        if (requestCanId === responseCanId - 8) {
+          return requestCanId;
+        }
+      }
+      
+      // Fallback for custom 11-bit pairs (Req+8 = Res)
+      if (responseCanId === requestCanId + 8) return requestCanId;
+    } else {
+      // Extended 29-bit Addressing (ISO 15765-2)
+      // Req: 18 DA [Target] [Source] | Res: 18 DA [Source] [Target]
       const reqPrefix = (requestCanId >>> 24) & 0xFF;
       const resPrefix = (responseCanId >>> 24) & 0xFF;
       if (reqPrefix === 0x18 && resPrefix === 0x18) {
@@ -224,16 +234,16 @@ export class TransportManager {
         const resDA = (responseCanId >>> 8) & 0xFF;
         const resSA = responseCanId & 0xFF;
         
+        // Physical Match: resSA == reqDA && resDA == reqSA
         if (resSA === reqDA && resDA === reqSA) return requestCanId;
+
+        // Functional 29-bit: 18 DB 33 F1 (Functional Request -> Physical Response)
         if (requestCanId === 0x18DB33F1 && resDA === 0xF1) {
-          // Functional 29-bit responded by physical ECU
+          // FC should go to the physical address of the responder: 18 DA [resSA] [TesterID=F1]
           return (0x18DA0000 | (resSA << 8) | 0xF1) >>> 0;
         }
       }
     }
-
-    // Fallback for custom 11-bit pairs (Req+8 = Res)
-    if (responseCanId === requestCanId + 8) return requestCanId;
 
     return null;
   }
@@ -393,11 +403,11 @@ export class TransportManager {
   /**
    * Unified Request / Response dispatcher with strict Real Mode vs Demo Mode enforcement
    */
-  public async sendRequest(requestBytes: number[], targetCanId: string = '0x7DF'): Promise<CommunicationPacket> {
+  public async sendRequest(requestBytes: number[], targetCanId: string = '0x7E0'): Promise<CommunicationPacket> {
     this.sequenceId++;
     const startTime = performance.now();
     const reqHex = requestBytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
-    const numCanId = parseInt(targetCanId.replace('0x', ''), 16) || 0x7DF;
+    const numCanId = parseInt(targetCanId.replace('0x', ''), 16) || 0x7E0;
     const isExtended = targetCanId.length > 5;
     const correlationId = `OBD-${this.sequenceId}`;
     
