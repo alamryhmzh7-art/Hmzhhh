@@ -5,6 +5,8 @@
 
 export type ConnectionStatus = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'ERROR';
 
+export type EcuLinkStatus = 'DISCONNECTED' | 'CHECKING' | 'LINKED' | 'ERROR';
+
 export type TransportType = 'WIFI_TCP' | 'BLUETOOTH_SPP';
 
 export interface BluetoothDeviceInfo {

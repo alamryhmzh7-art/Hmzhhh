@@ -28,10 +28,19 @@ interface PendingDiagnosticRequest {
   isoTpTimer?: any;
   correlationId: string;
   isExtended: boolean;
+  // RX State
   isoTpBuffer?: {
     totalLength: number;
     receivedBytes: number[];
     expectedSequence: number;
+  };
+  // TX State
+  txState?: {
+    remainingBytes: number[];
+    nextSequence: number;
+    blockSize: number;
+    stMin: number;
+    framesInBlock: number;
   };
 }
 
@@ -72,6 +81,9 @@ export class TransportManager {
     });
 
     const handleCanFrame = (frame: CanFrame) => {
+      // Direct raw traffic to the CAN Monitor
+      canManager.addFrame(frame);
+
       const frameIdNum = parseInt(frame.id.replace('0x', ''), 16);
       
       // Log EVERY incoming CAN frame at the transport manager level
@@ -108,7 +120,19 @@ export class TransportManager {
 
         const pciType = data[0] & 0xF0;
 
-        // Strict PID matching check for start of response
+        // 1. Handle Flow Control (0x30)
+        if (pciType === IsoTpFrameType.FLOW_CONTROL) {
+          this.handleFlowControl(req, frameIdNum, data, seq);
+          break;
+        }
+
+        // 2. Handle Reassembly for Multi-frame response (0x20)
+        if (req.isoTpBuffer && pciType === IsoTpFrameType.CONSECUTIVE_FRAME) {
+          this.handleConsecutiveFrame(req, frameIdNum, data, seq);
+          break;
+        }
+
+        // 3. Strict PID matching check for start of response (SF or FF)
         if (!req.isoTpBuffer) {
           let payloadStart: number[] = [];
           if (pciType === 0x00) payloadStart = data.slice(1, 3);
@@ -133,36 +157,12 @@ export class TransportManager {
 
         // ISO-TP Reassembly
         if (req.isoTpBuffer) {
-           if (pciType === 0x20) {
-              if (req.isoTpTimer) clearTimeout(req.isoTpTimer);
-              const cfSeq = data[0] & 0x0F;
-              if (cfSeq === req.isoTpBuffer.expectedSequence) {
-                const remaining = req.isoTpBuffer.totalLength - req.isoTpBuffer.receivedBytes.length;
-                const take = Math.min(7, remaining);
-                for (let i = 0; i < take; i++) req.isoTpBuffer.receivedBytes.push(data[1 + i]);
-                req.isoTpBuffer.expectedSequence = (req.isoTpBuffer.expectedSequence + 1) & 0x0F;
-
-                if (req.isoTpBuffer.receivedBytes.length >= req.isoTpBuffer.totalLength) {
-                  const fullPayload = req.isoTpBuffer.receivedBytes.slice(0, req.isoTpBuffer.totalLength);
-                  this.cleanupRequest(seq);
-                  req.resolve(fullPayload);
-                } else {
-                  req.isoTpTimer = setTimeout(() => {
-                    this.cleanupRequest(seq);
-                    req.reject(new Error('ISO_TP_CONSECUTIVE_FRAME_TIMEOUT'));
-                  }, 1500);
-                }
-              } else {
-                this.cleanupRequest(seq);
-                req.reject(new Error('ISO_TP_SEQUENCE_MISMATCH'));
-              }
-           }
            break;
         }
 
-        if (pciType === 0x00) {
+        if (pciType === IsoTpFrameType.SINGLE_FRAME) {
            this.handleSingleFrame(req, frameIdNum, data, seq);
-        } else if (pciType === 0x10) {
+        } else if (pciType === IsoTpFrameType.FIRST_FRAME) {
            this.handleFirstFrame(req, frameIdNum, data, seq);
         }
         break;
@@ -234,6 +234,24 @@ export class TransportManager {
     return this.activeTransport.ping();
   }
 
+  /**
+   * Verifies if the car's computers (ECUs) are actually responding to requests.
+   * Sends a functional broadcast (01 00) and waits for any response in the 0x7E8-0x7EF range.
+   */
+  public async checkCarEcuLink(): Promise<boolean> {
+    if (!this.isConnected()) return false;
+    
+    try {
+      // 01 00 = OBD-II Mode 1, PID 00 (Supported PIDs 01-20)
+      // This is a standard functional broadcast request.
+      const response = await this.sendRequest([0x01, 0x00], '0x7DF');
+      return response.status === 'SUCCESS' || response.status === 'NRC';
+    } catch (err) {
+      console.warn('[TM] Car ECU link check failed:', err);
+      return false;
+    }
+  }
+
   public async getCanStatus(): Promise<CanBusStatus> {
     return this.activeTransport.getCanStatus();
   }
@@ -251,21 +269,75 @@ export class TransportManager {
     }
   }
 
+  private handleConsecutiveFrame(req: PendingDiagnosticRequest, frameIdNum: number, data: number[], seq: number) {
+    if (!req.isoTpBuffer) {
+      console.warn(`[ISO-TP] Unexpected Consecutive Frame from 0x${frameIdNum.toString(16).toUpperCase()} (No active session)`);
+      return;
+    }
+
+    if (req.isoTpTimer) clearTimeout(req.isoTpTimer);
+
+    // Sequence Number Validation (PCI bits 0-3)
+    const cfSeq = data[0] & 0x0F;
+    if (cfSeq === req.isoTpBuffer.expectedSequence) {
+      const remaining = req.isoTpBuffer.totalLength - req.isoTpBuffer.receivedBytes.length;
+      const take = Math.min(7, remaining);
+      
+      for (let i = 0; i < take; i++) {
+        req.isoTpBuffer.receivedBytes.push(data[1 + i]);
+      }
+      
+      // Update expected sequence (wrap 0-15)
+      req.isoTpBuffer.expectedSequence = (req.isoTpBuffer.expectedSequence + 1) & 0x0F;
+
+      if (req.isoTpBuffer.receivedBytes.length >= req.isoTpBuffer.totalLength) {
+        // Complete Reassembly
+        const fullPayload = req.isoTpBuffer.receivedBytes.slice(0, req.isoTpBuffer.totalLength);
+        console.log(`[ISO-TP-RX] REASSEMBLY SUCCESS: ID=0x${frameIdNum.toString(16).toUpperCase()} LEN=${req.isoTpBuffer.totalLength}`);
+        this.cleanupRequest(seq);
+        req.resolve(fullPayload);
+      } else {
+        // N_Cr Timeout (Inter-frame) - ISO 15765-2 standard is 1000ms, using 1500ms for network jitter
+        req.isoTpTimer = setTimeout(() => {
+          console.error(`[ISO-TP-RX] N_Cr TIMEOUT: Waiting for CF ${req.isoTpBuffer?.expectedSequence} (Got ${req.isoTpBuffer?.receivedBytes.length}/${req.isoTpBuffer?.totalLength})`);
+          this.cleanupRequest(seq);
+          req.reject(new Error('ISO_TP_N_Cr_TIMEOUT'));
+        }, 1500);
+      }
+    } else {
+      console.error(`[ISO-TP-RX] SEQUENCE ERROR: Expected ${req.isoTpBuffer.expectedSequence}, got ${cfSeq}. Aborting reassembly.`);
+      this.cleanupRequest(seq);
+      req.reject(new Error('ISO_TP_SEQUENCE_MISMATCH'));
+    }
+  }
+
   private handleSingleFrame(req: PendingDiagnosticRequest, frameIdNum: number, data: number[], seq: number) {
     const sfLength = data[0] & 0x0F;
-    if (sfLength === 0 || sfLength > 7) return;
+    if (sfLength === 0 || sfLength > 7) {
+      console.warn(`[ISO-TP] Invalid SF Length: ${sfLength}`);
+      return;
+    }
     const payload = data.slice(1, 1 + sfLength);
+    console.log(`[ISO-TP-RX] Single Frame: Len=${sfLength} Payload=[${payload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
     this.cleanupRequest(seq);
     req.resolve(payload);
   }
 
   private handleFirstFrame(req: PendingDiagnosticRequest, frameIdNum: number, data: number[], seq: number) {
+    // FF Length is in PCI bits 0-3 (MSB) and second byte (LSB)
     const totalLength = ((data[0] & 0x0F) << 8) | data[1];
-    if (totalLength <= 6 || totalLength > 4095) {
+    
+    // Validation: ISO-TP FF length must be > 7 (otherwise SF should be used)
+    if (totalLength <= 7 || totalLength > 4095) {
+       console.error(`[ISO-TP-RX] INVALID FF LENGTH: ${totalLength}. Dropping frame.`);
        this.cleanupRequest(seq);
-       req.reject(new Error('ISO_TP_INVALID_LENGTH'));
+       req.reject(new Error('ISO_TP_INVALID_FF_LENGTH'));
        return;
     }
+    
+    console.log(`[ISO-TP-RX] FIRST FRAME RECEIVED: TotalLen=${totalLength}`);
+    
+    // Initialize reassembly buffer
     req.isoTpBuffer = {
       totalLength,
       receivedBytes: [...data.slice(2, 8)],
@@ -274,21 +346,124 @@ export class TransportManager {
 
     const fcTargetId = this.resolveIsoTpFlowControlId(req.canId, frameIdNum, req.isExtended);
     if (fcTargetId === null) {
+      console.error(`[ISO-TP] ADDRESSING ERROR: Failed to resolve Flow Control ID for 0x${frameIdNum.toString(16).toUpperCase()}`);
       this.cleanupRequest(seq);
-      req.reject(new Error('ISO_TP_ADDRESSING_ERROR'));
+      req.reject(new Error('ISO_TP_FC_ID_RESOLUTION_FAILED'));
       return;
     }
 
+    // N_Br Timeout (Time between FF and FC transmission) - Not strictly enforced here but N_Cr is
+    if (req.isoTpTimer) clearTimeout(req.isoTpTimer);
     req.isoTpTimer = setTimeout(() => {
+      console.error(`[ISO-TP-RX] N_Cr TIMEOUT: Waiting for first CF after FC`);
       this.cleanupRequest(seq);
-      req.reject(new Error('ISO_TP_CONSECUTIVE_FRAME_TIMEOUT'));
+      req.reject(new Error('ISO_TP_N_Cr_TIMEOUT'));
     }, 1500);
 
+    // Send Flow Control (0x30, BS=0 (Full transfer), STmin=0 (No delay requested))
     const fcFrame = [0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-    this.activeTransport.sendCanFrame(fcTargetId, fcFrame, req.isExtended).catch(err => {
-      this.cleanupRequest(seq);
-      req.reject(new Error('FLOW_CONTROL_SEND_FAILED'));
+    console.log(`[ISO-TP-TX] SENDING FLOW CONTROL: TARGET=0x${fcTargetId.toString(16).toUpperCase()} STATUS=CONTINUE`);
+    
+    // Log to CAN Monitor
+    canManager.addFrame({
+      id: `0x${fcTargetId.toString(16).toUpperCase()}`,
+      dlc: 8,
+      dataHex: fcFrame.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' '),
+      dataBytes: fcFrame,
+      direction: 'Tx',
+      isExtended: req.isExtended,
+      description: 'ISO-TP Flow Control (CTS)'
     });
+
+    this.activeTransport.sendCanFrame(fcTargetId, fcFrame, req.isExtended).catch(err => {
+      console.error(`[ISO-TP-TX] FC SEND FAILED:`, err);
+      this.cleanupRequest(seq);
+      req.reject(new Error('ISO_TP_FC_TRANSMIT_ERROR'));
+    });
+  }
+
+  private handleFlowControl(req: PendingDiagnosticRequest, frameIdNum: number, data: number[], seq: number) {
+    if (!req.txState) {
+      console.warn(`[ISO-TP] SPURIOUS FLOW CONTROL: Received FC from 0x${frameIdNum.toString(16).toUpperCase()} but not in TX state.`);
+      return;
+    }
+
+    const flowStatus = data[0] & 0x0F;
+    const blockSize = data[1];
+    const stMin = data[2];
+
+    console.log(`[ISO-TP-RX] FLOW CONTROL RECEIVED: STATUS=${flowStatus} BS=${blockSize} STmin=${stMin}`);
+
+    if (flowStatus === FlowStatus.WAIT) {
+      console.log(`[ISO-TP] ECU REQUESTED WAIT: Extending N_Bs timeout.`);
+      if (req.timer) {
+        clearTimeout(req.timer);
+        req.timer = setTimeout(() => {
+          this.cleanupRequest(seq);
+          req.reject(new Error('ISO_TP_TIMEOUT_AFTER_WAIT'));
+        }, 5000);
+      }
+      return;
+    }
+
+    if (flowStatus === FlowStatus.OVERFLOW) {
+      console.error(`[ISO-TP] ECU REPORTED OVERFLOW: Aborting multi-frame transmission.`);
+      this.cleanupRequest(seq);
+      req.reject(new Error('ISO_TP_BUFFER_OVERFLOW'));
+      return;
+    }
+
+    if (flowStatus === FlowStatus.CONTINUE_TO_SEND) {
+      req.txState.blockSize = blockSize;
+      req.txState.stMin = stMin;
+      req.txState.framesInBlock = 0;
+      this.sendNextConsecutiveFrames(req, seq);
+    }
+  }
+
+  private async sendNextConsecutiveFrames(req: PendingDiagnosticRequest, seq: number) {
+    if (!req.txState || req.txState.remainingBytes.length === 0) return;
+
+    const { remainingBytes, nextSequence, blockSize, stMin } = req.txState;
+    let framesToPulse = blockSize === 0 ? 100 : blockSize; 
+
+    while (framesToPulse > 0 && req.txState.remainingBytes.length > 0) {
+      const take = Math.min(7, req.txState.remainingBytes.length);
+      const payload = req.txState.remainingBytes.slice(0, take);
+      req.txState.remainingBytes = req.txState.remainingBytes.slice(take);
+      
+      const cfFrame = [(0x20 | (req.txState.nextSequence & 0x0F)), ...payload];
+      while (cfFrame.length < 8) cfFrame.push(0x00);
+
+      // Log to CAN Monitor
+      canManager.addFrame({
+        id: `0x${req.canId.toString(16).toUpperCase()}`,
+        dlc: 8,
+        dataHex: cfFrame.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' '),
+        dataBytes: cfFrame,
+        direction: 'Tx',
+        isExtended: req.isExtended,
+        description: `ISO-TP Consecutive Frame ${req.txState.nextSequence & 0x0F}`
+      });
+
+      const ok = await this.activeTransport.sendCanFrame(req.canId, cfFrame, req.isExtended);
+      if (!ok) {
+        this.cleanupRequest(seq);
+        req.reject(new Error('CF_SEND_FAILED'));
+        return;
+      }
+
+      req.txState.nextSequence = (req.txState.nextSequence + 1) & 0x0F;
+      framesToPulse--;
+      req.txState.framesInBlock++;
+
+      if (stMin > 0) {
+        await new Promise(r => setTimeout(r, stMin));
+      }
+    }
+
+    // If we finished the block but still have bytes, we wait for next FC (if BS > 0)
+    // If BS was 0, we should have sent everything.
   }
 
   public resolveIsoTpFlowControlId(requestCanId: number, responseCanId: number, isExtended: boolean): number | null {
@@ -383,19 +558,24 @@ export class TransportManager {
 
     try {
       let canPayload: number[];
+      let multiFrameTx = false;
+      let remainingTxBytes: number[] = [];
+
       if (requestBytes.length <= 7) {
         canPayload = [requestBytes.length, ...requestBytes];
         while (canPayload.length < 8) canPayload.push(0x00);
       } else {
         // Multi-frame request initialization (ISO-TP First Frame)
-        canPayload = [0x10, requestBytes.length >> 8, requestBytes.length & 0xFF, ...requestBytes.slice(0, 5)];
+        multiFrameTx = true;
+        canPayload = [0x10, (requestBytes.length >> 8) & 0x0F, requestBytes.length & 0xFF, ...requestBytes.slice(0, 5)];
+        remainingTxBytes = requestBytes.slice(5);
       }
 
       const seq = this.sequenceId;
       let actualResponseIdNum = numCanId + 8;
 
       const responsePromise = new Promise<number[]>((resolve, reject) => {
-        const timeoutMs = requestBytes.length > 7 ? 5000 : 2500; // Longer timeout for multi-frame
+        const timeoutMs = requestBytes.length > 7 ? 7000 : 2500; 
         const timer = setTimeout(() => {
           this.cleanupRequest(seq);
           const expectedRange = (numCanId === 0x7DF) ? '0x7E8-0x7EF' : '0x' + (numCanId + 8).toString(16).toUpperCase();
@@ -424,12 +604,31 @@ export class TransportManager {
           requestBytes: [...requestBytes],
           isExtended,
           correlationId,
-          timer
+          timer,
+          txState: multiFrameTx ? {
+            remainingBytes: remainingTxBytes,
+            nextSequence: 1,
+            blockSize: 0,
+            stMin: 0,
+            framesInBlock: 0
+          } : undefined
         };
       });
 
       // Send the frame
       console.log(`[CAN-TX] [${correlationId}] ID=0x${numCanId.toString(16).toUpperCase()} DATA=[${canPayload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
+      
+      // Log to CAN Monitor
+      canManager.addFrame({
+        id: `0x${numCanId.toString(16).toUpperCase()}`,
+        dlc: canPayload.length,
+        dataHex: canPayload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' '),
+        dataBytes: canPayload,
+        direction: 'Tx',
+        isExtended,
+        description: multiFrameTx ? 'ISO-TP First Frame' : 'ISO-TP Single Frame'
+      });
+
       commLogger.logPacket({
         direction: '[TX]',
         protocol: this.config.protocol,

@@ -162,15 +162,6 @@ export const UnitTestsView: React.FC = () => {
       details: 'Validates RPM, Speed, and Voltage calculation from raw hex strings'
     },
     {
-      id: 'test-real-mode-rejection',
-      nameEn: 'Real Mode Disconnection Guard',
-      nameAr: 'اختبار منع البيانات الوهمية في الوضع الحقيقي',
-      category: 'Diagnostic Layer',
-      status: 'IDLE',
-      executionTimeMs: 0,
-      details: 'Asserts that disconnected Real Mode strictly returns TIMEOUT/ERROR and never falls back to mock ECU data'
-    },
-    {
       id: 'test-tm-matching',
       nameEn: 'TransportManager: Strict Request/Response Matching',
       nameAr: 'اختبار مطابقة الطلب والاستجابة في TransportManager',

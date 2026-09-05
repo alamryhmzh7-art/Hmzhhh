@@ -63,8 +63,10 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
 
         mockEcuServer.setRpm(currentRpm);
         mockEcuServer.setSpeed(currentSpeed);
-      } else if (status === 'CONNECTED') {
-        // Strict REAL MODE: Sequential Polling (One PID at a time)
+      }
+
+      // Strict REAL MODE: Sequential Polling (One PID at a time)
+      if (!isMockMode && status === 'CONNECTED') {
         try {
           // 1. Poll RPM (PID 0x0C)
           const respRpm = await transportManager.sendRequest([0x01, 0x0C], '0x7DF');
@@ -72,9 +74,6 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
             const bytes = respRpm.responseRaw.split(' ').map(b => parseInt(b, 16));
             if (bytes.length >= 4 && bytes[0] === 0x41 && bytes[1] === 0x0C) {
               currentRpm = Math.round(((bytes[2] * 256) + bytes[3]) / 4);
-              console.log(`[PID] 0C RPM=${currentRpm}`);
-            } else {
-              console.warn(`[PID-MISMATCH] Requested 01 0C, got: ${respRpm.responseRaw}`);
             }
           }
 
@@ -84,9 +83,6 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
             const bytes = respSpeed.responseRaw.split(' ').map(b => parseInt(b, 16));
             if (bytes.length >= 3 && bytes[0] === 0x41 && bytes[1] === 0x0D) {
               currentSpeed = bytes[2];
-              console.log(`[PID] 0D SPEED=${currentSpeed}`);
-            } else {
-              console.warn(`[PID-MISMATCH] Requested 01 0D, got: ${respSpeed.responseRaw}`);
             }
           }
 
@@ -96,9 +92,6 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
             const bytes = respCoolant.responseRaw.split(' ').map(b => parseInt(b, 16));
             if (bytes.length >= 3 && bytes[0] === 0x41 && bytes[1] === 0x05) {
               currentCoolant = bytes[2] - 40;
-              console.log(`[PID] 05 COOLANT=${currentCoolant}`);
-            } else {
-              console.warn(`[PID-MISMATCH] Requested 01 05, got: ${respCoolant.responseRaw}`);
             }
           }
 
@@ -108,9 +101,6 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
             const bytes = respVolt.responseRaw.split(' ').map(b => parseInt(b, 16));
             if (bytes.length >= 4 && bytes[0] === 0x41 && bytes[1] === 0x42) {
               currentVolt = parseFloat((((bytes[2] * 256) + bytes[3]) / 1000).toFixed(2));
-              console.log(`[PID] 42 VOLTAGE=${currentVolt}`);
-            } else {
-              console.warn(`[PID-MISMATCH] Requested 01 42, got: ${respVolt.responseRaw}`);
             }
           }
         } catch (e: any) {
@@ -119,13 +109,20 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
       }
 
       setPids(prev => prev.map(p => {
-        let val = p.currentValue;
+        let val: number | null = null;
+        
+        // Match specific PIDs being polled
         if (p.pidHex === '0C') val = currentRpm;
-        if (p.pidHex === '0D') val = currentSpeed;
-        if (p.pidHex === '05') val = currentCoolant;
-        if (p.pidHex === '11') val = currentTps;
-        if (p.pidHex === '04') val = currentLoad;
-        if (p.pidHex === '42') val = currentVolt;
+        else if (p.pidHex === '0D') val = currentSpeed;
+        else if (p.pidHex === '05') val = currentCoolant;
+        else if (p.pidHex === '11') val = currentTps;
+        else if (p.pidHex === '04') val = currentLoad;
+        else if (p.pidHex === '42') val = currentVolt;
+        else {
+          // If we are not polling this PID in the current loop, keep its value IF we are in Mock Mode
+          // Otherwise, if in Real Mode and Disconnected, it must be null.
+          val = isMockMode ? p.currentValue : (status === 'CONNECTED' ? p.currentValue : null);
+        }
 
         const numVal = typeof val === 'number' ? val : 0;
 

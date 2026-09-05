@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { I18nProvider, useI18n } from './i18n/I18nContext';
-import { ConnectionConfig, ConnectionStatus, DiagnosticTroubleCode, VinInfo, ViewTab, EcuInfo, TransportType } from './types';
+import { ConnectionConfig, ConnectionStatus, EcuLinkStatus, DiagnosticTroubleCode, VinInfo, ViewTab, EcuInfo, TransportType } from './types';
 import { KNOWN_ECU_NODES } from './ecu/ecuScanner';
 import { transportManager, defaultConnectionConfig } from './network/TransportManager';
 import { AuthProvider, useAuth } from './services/AuthContext';
@@ -49,14 +49,22 @@ const MainApp: React.FC = () => {
   const [activeTab, setActiveTab] = useState<ViewTab>('dashboard');
   const [config, setConfig] = useState<ConnectionConfig>(defaultConnectionConfig);
   const [status, setStatus] = useState<ConnectionStatus>('DISCONNECTED');
+  const [ecuLinkStatus, setEcuLinkStatus] = useState<EcuLinkStatus>('DISCONNECTED');
   const [isConnModalOpen, setIsConnModalOpen] = useState<boolean>(false);
-  const [batteryVoltage, setBatteryVoltage] = useState<number>(14.15);
+  const [batteryVoltage, setBatteryVoltage] = useState<number>(0.0);
 
   useEffect(() => {
     // Subscribe to Transport Manager state changes
     const unsub = transportManager.subscribeStatus((newStatus, transportType) => {
       setStatus(newStatus);
       setConfig(prev => ({ ...prev, transportType }));
+      
+      // Reset telemetry if disconnected
+      if (newStatus === 'DISCONNECTED') {
+        setBatteryVoltage(0.0);
+        setEcuLinkStatus('DISCONNECTED');
+        setEcuList(prev => prev.map(e => ({ ...e, status: 'OFFLINE', dtcCount: 0 })));
+      }
     });
     return () => {
       unsub();
@@ -121,70 +129,28 @@ const MainApp: React.FC = () => {
   };
 
   const [vinInfo, setVinInfo] = useState<VinInfo>({
-    rawVin: '4T1BF1FK5NU123456',
-    isValid: true,
-    manufacturer: 'Toyota',
-    model: 'Camry',
-    year: 2022,
-    country: 'United States',
-    engineType: '2.5L Dynamic Force 4-Cylinder (A25A-FKS)',
-    transmission: '8-Speed Direct-Shift Automatic (UB80E)',
-    bodyType: '4-Door Sedan',
-    plantCode: 'Georgetown, Kentucky, USA'
+    rawVin: '',
+    isValid: false,
+    manufacturer: '',
+    model: '',
+    year: undefined,
+    country: '',
+    engineType: '',
+    transmission: '',
+    bodyType: '',
+    plantCode: ''
   });
 
   const [ecuList, setEcuList] = useState<EcuInfo[]>(() =>
     KNOWN_ECU_NODES.map(node => ({
       ...node,
-      status: 'ONLINE',
-      dtcCount: node.id === 'ecu-engine' ? 2 : node.id === 'ecu-abs' ? 1 : 0,
-      supportedPidsCount: node.id === 'ecu-engine' ? 48 : node.id === 'ecu-trans' ? 24 : 16
+      status: 'OFFLINE',
+      dtcCount: 0,
+      supportedPidsCount: 0
     }))
   );
 
-  const [dtcList, setDtcList] = useState<DiagnosticTroubleCode[]>([
-    {
-      code: 'P0171',
-      system: 'POWERTRAIN',
-      descriptionEn: 'System Too Lean (Bank 1)',
-      descriptionAr: 'النظام فقير جدًا في خليط الوقود (المصرف 1) - تسريب هواء أو ضعف ضخ الوقود',
-      severity: 'HIGH',
-      status: 'CONFIRMED',
-      ecuAddressHex: '0x7E0',
-      freezeFrameAvailable: true,
-      possibleCauses: ['Vacuum Leak in Intake', 'Faulty MAF Sensor', 'Clogged Fuel Injector', 'Low Fuel Pressure'],
-      freezeFrameData: {
-        engineRpm: 2150,
-        vehicleSpeed: 64,
-        coolantTempC: 89,
-        calculatedLoadPercent: 42,
-        shortTermFuelTrim1: 18.5,
-        longTermFuelTrim1: 22.0
-      }
-    },
-    {
-      code: 'P0300',
-      system: 'POWERTRAIN',
-      descriptionEn: 'Random/Multiple Cylinder Misfire Detected',
-      descriptionAr: 'اكتشاف فقد إشعال عشوائي أو متعدد في أسطوانات المحرك',
-      severity: 'HIGH',
-      status: 'PENDING',
-      ecuAddressHex: '0x7E0',
-      freezeFrameAvailable: true,
-      possibleCauses: ['Worn Spark Plugs', 'Faulty Ignition Coil', 'Low Compression', 'Fuel Delivery Issue']
-    },
-    {
-      code: 'C1201',
-      system: 'CHASSIS',
-      descriptionEn: 'Engine Control System Malfunction (ABS / VSC Interlock)',
-      descriptionAr: 'خلل في نظام التحكم بالمحرك تم تمريره إلى نظام مانع الانزلاق والفرامل ABS/VSC',
-      severity: 'MEDIUM',
-      status: 'CONFIRMED',
-      ecuAddressHex: '0x7E2',
-      freezeFrameAvailable: false,
-      possibleCauses: ['Check Engine Light Triggered in ECM', 'VSC Disabled by ECM Request']
-    }
-  ]);
+  const [dtcList, setDtcList] = useState<DiagnosticTroubleCode[]>([]);
 
   // Connect / Disconnect handlers
   const handleConnect = async () => {
@@ -193,6 +159,21 @@ const MainApp: React.FC = () => {
 
   const handleDisconnect = async () => {
     await transportManager.disconnect();
+    setEcuLinkStatus('DISCONNECTED');
+  };
+
+  const handleCheckCarLink = async () => {
+    if (status !== 'CONNECTED') return;
+    
+    setEcuLinkStatus('CHECKING');
+    try {
+      const linked = await transportManager.checkCarEcuLink();
+      setEcuLinkStatus(linked ? 'LINKED' : 'ERROR');
+      return linked;
+    } catch (err) {
+      setEcuLinkStatus('ERROR');
+      return false;
+    }
   };
 
   const handleToggleMockMode = () => {
@@ -226,10 +207,12 @@ const MainApp: React.FC = () => {
       <Header
         status={status}
         config={config}
+        ecuLinkStatus={ecuLinkStatus}
         batteryVoltage={batteryVoltage}
         onConnect={handleConnect}
         onDisconnect={handleDisconnect}
         onToggleMockMode={handleToggleMockMode}
+        onPing={handleCheckCarLink}
         onOpenConnectionManager={() => setIsConnModalOpen(true)}
       />
 
@@ -280,6 +263,7 @@ const MainApp: React.FC = () => {
           <Dashboard
             status={status}
             config={config}
+            isCarLinked={ecuLinkStatus === 'LINKED'}
             vinInfo={vinInfo}
             dtcList={dtcList}
             ecuList={ecuList}

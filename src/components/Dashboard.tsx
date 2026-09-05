@@ -27,6 +27,7 @@ import {
 interface DashboardProps {
   status?: ConnectionStatus;
   config?: ConnectionConfig;
+  isCarLinked?: boolean;
   vinInfo?: VinInfo;
   dtcList?: DiagnosticTroubleCode[];
   ecuList?: EcuInfo[];
@@ -50,6 +51,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
     autoReconnect: true,
     isMockMode: false
   },
+  isCarLinked = false,
   vinInfo = {
     rawVin: '4T1BF1FK5NU123456',
     isValid: true,
@@ -108,13 +110,17 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <span>{t('dashDeviceStatus')}</span>
             <Activity className="h-4 w-4 text-cyan-400" />
           </div>
-          <div className="mt-2">
-            <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold border ${statusBadge.bg}`}>
+          <div className="mt-2 flex flex-col gap-1.5">
+            <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold border w-fit ${statusBadge.bg}`}>
               {statusBadge.text}
             </span>
+            <div className={`text-[10px] font-bold flex items-center gap-1.5 ${isCarLinked ? 'text-emerald-400' : 'text-slate-500'}`}>
+              <Cpu className="h-3 w-3" />
+              <span>{isCarLinked ? (isRtl ? 'اتصال كمبيوتر السيارة: فعال' : 'Car ECU Link: Active') : (isRtl ? 'لا يوجد رد من السيارة' : 'Car ECU: No Signal')}</span>
+            </div>
           </div>
           <div className="mt-2 text-[11px] text-slate-400 font-mono">
-            {config.ip}:{config.port}
+            {config.transportType === 'BLUETOOTH_SPP' ? (config.bluetoothDeviceName || 'BT-OBD') : `${config.ip}:${config.port}`}
           </div>
         </div>
 
@@ -328,13 +334,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
           {/* 7. CAN Monitor */}
           <button
             onClick={() => onNavigate('canMonitor')}
-            className="group p-4 rounded-xl bg-slate-900/90 hover:bg-slate-800/90 border border-slate-800 hover:border-cyan-500/50 transition-all text-left flex flex-col justify-between shadow-sm"
+            className="group p-4 rounded-xl bg-slate-900 border border-slate-800 hover:border-cyan-500/50 transition-all text-left flex flex-col justify-between shadow-sm"
           >
             <div className="flex items-center justify-between w-full">
-              <div className="h-11 w-11 rounded-lg bg-cyan-500/15 border border-cyan-400/30 flex items-center justify-center text-cyan-400 group-hover:scale-105 transition-transform">
+              <div className="h-11 w-11 rounded-lg bg-cyan-950 border border-cyan-800 flex items-center justify-center text-cyan-400 group-hover:scale-105 transition-transform">
                 <Radio className="h-6 w-6" />
               </div>
-              <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800">
+              <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800 font-bold">
                 Raw CAN
               </span>
             </div>

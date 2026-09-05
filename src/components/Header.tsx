@@ -1,6 +1,6 @@
 import React from 'react';
 import { useI18n } from '../i18n/I18nContext';
-import { ConnectionStatus, ConnectionConfig } from '../types';
+import { ConnectionStatus, ConnectionConfig, EcuLinkStatus } from '../types';
 import { useAuth } from '../services/AuthContext';
 import { 
   Activity, 
@@ -22,6 +22,7 @@ import {
 interface HeaderProps {
   status: ConnectionStatus;
   config: ConnectionConfig;
+  ecuLinkStatus?: EcuLinkStatus;
   batteryVoltage?: number;
   activeTab?: string;
   setActiveTab?: (tab: string) => void;
@@ -36,6 +37,7 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = ({
   status,
   config,
+  ecuLinkStatus = 'DISCONNECTED',
   batteryVoltage = 14.15,
   activeTab,
   setActiveTab,
@@ -145,6 +147,30 @@ export const Header: React.FC<HeaderProps> = ({
             <span>{getStatusText(status)}</span>
           </div>
 
+          {/* Car Link Status Badge */}
+          {status === 'CONNECTED' && (
+            <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold border shadow-sm transition-all ${
+              ecuLinkStatus === 'LINKED'
+                ? 'bg-cyan-500 text-cyan-950 border-cyan-400 shadow-cyan-500/20' 
+                : ecuLinkStatus === 'CHECKING'
+                ? 'bg-amber-500/20 text-amber-400 border-amber-500/40'
+                : ecuLinkStatus === 'ERROR'
+                ? 'bg-rose-500/20 text-rose-400 border-rose-500/40'
+                : 'bg-slate-800 text-slate-400 border-slate-700'
+            }`}>
+              <Cpu className={`h-3.5 w-3.5 ${ecuLinkStatus === 'CHECKING' ? 'animate-spin' : ecuLinkStatus === 'LINKED' ? 'animate-pulse' : ''}`} />
+              <span>
+                {ecuLinkStatus === 'LINKED' 
+                  ? (language === 'ar' ? 'كمبيوتر السيارة: متصل' : 'Car ECU: Linked')
+                  : ecuLinkStatus === 'CHECKING'
+                  ? (language === 'ar' ? 'جاري الفحص...' : 'Checking ECU...')
+                  : ecuLinkStatus === 'ERROR'
+                  ? (language === 'ar' ? 'خطأ في الاتصال' : 'Link Error')
+                  : (language === 'ar' ? 'لا يوجد اتصال بالسيارة' : 'Car ECU: No Link')}
+              </span>
+            </div>
+          )}
+
           {/* Connect / Disconnect Action Button */}
           <button
             onClick={handleConnectToggle}
@@ -158,15 +184,20 @@ export const Header: React.FC<HeaderProps> = ({
             <span>{status === 'CONNECTED' ? t('btnDisconnect') : t('btnConnect')}</span>
           </button>
 
-          {/* Ping Button */}
+          {/* Ping / Refresh Link Button */}
           {status === 'CONNECTED' && (
             <button
               onClick={handlePing}
-              className="px-2.5 py-1.5 rounded-lg text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 flex items-center gap-1 transition-colors"
-              title={t('btnPing')}
+              disabled={ecuLinkStatus === 'CHECKING'}
+              className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border flex items-center gap-1.5 transition-all ${
+                ecuLinkStatus === 'CHECKING'
+                  ? 'bg-slate-800 text-slate-500 border-slate-700 cursor-not-allowed'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700 hover:border-cyan-500/50'
+              }`}
+              title={language === 'ar' ? 'تحديث الاتصال بكمبيوتر السيارة' : 'Refresh Car ECU Link'}
             >
-              <Radio className="h-3.5 w-3.5 text-cyan-400" />
-              <span>Ping</span>
+              <RefreshCw className={`h-3.5 w-3.5 text-cyan-400 ${ecuLinkStatus === 'CHECKING' ? 'animate-spin' : ''}`} />
+              <span>{language === 'ar' ? 'فحص الرابط' : 'Check Link'}</span>
             </button>
           )}
 
