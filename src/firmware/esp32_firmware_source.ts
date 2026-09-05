@@ -327,6 +327,15 @@ void handleParsedCommand(uint8_t cmd, uint16_t len, const uint8_t* payload, bool
           stats.messagesSent++;
         } else {
           stats.txErrorCount++;
+          // Auto-recovery for bus off or stopped state
+          twai_status_info_t s_info;
+          if (twai_get_status_info(&s_info) == ESP_OK) {
+            if (s_info.state == TWAI_STATE_BUS_OFF) {
+              twai_initiate_recovery();
+            } else if (s_info.state == TWAI_STATE_STOPPED) {
+              twai_start();
+            }
+          }
         }
       }
       break;

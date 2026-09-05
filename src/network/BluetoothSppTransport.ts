@@ -297,12 +297,12 @@ export class BluetoothSppTransport implements ITransport {
 
     const isNative = Capacitor.isNativePlatform();
     if (isNative) {
-      console.log(`[BT-NATIVE] TX: ${hex}`);
+      console.log(`[BT-TX] ${hex}`);
       try {
         await BluetoothSpp.write({ data: Array.from(byteArr) });
         return true;
       } catch (err: any) {
-        console.error('[BT-NATIVE] Write Error', err);
+        console.error('[BT-TX] Write Error', err);
         return false;
       }
     }
@@ -312,6 +312,8 @@ export class BluetoothSppTransport implements ITransport {
 
   public async sendCanFrame(canId: number, data: number[], isExtended: boolean = false): Promise<boolean> {
     if (!this.isConnected()) return false;
+    const hexData = data.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+    console.log(`[CAN-TX] ID=0x${canId.toString(16).toUpperCase()} DLC=${data.length} DATA=${hexData}`);
     const packet = BinaryProtocol.encodeCanFrame(canId, data, isExtended);
     return this.sendRaw(packet);
   }
@@ -462,6 +464,9 @@ export class BluetoothSppTransport implements ITransport {
     merged.set(newBytes, this.rxBuffer.length);
     this.rxBuffer = merged;
 
+    const rxHex = Array.from(newBytes).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+    console.log(`[BT-RX] ${rxHex}`);
+
     const { packets, remainingBuffer } = BinaryProtocol.parseStream(this.rxBuffer);
     this.rxBuffer = remainingBuffer;
 
@@ -470,6 +475,7 @@ export class BluetoothSppTransport implements ITransport {
 
   private processDecodedPacket(pkt: DecodedBinaryPacket) {
     if (pkt.cmd === BinaryCommand.CMD_CAN_FRAME && pkt.canFrame) {
+      console.log(`[CAN-RX] ID=${pkt.canFrame.id} DLC=${pkt.canFrame.dlc} DATA=${pkt.canFrame.dataHex}`);
       commLogger.logPacket({
         direction: '[BT RX]',
         protocol: pkt.canFrame.isExtended ? 'CAN 29-bit' : 'CAN 11-bit',

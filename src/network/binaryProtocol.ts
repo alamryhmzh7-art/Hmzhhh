@@ -138,10 +138,12 @@ export class BinaryProtocol {
     return this.wrapPacket(BinaryCommand.CMD_CONFIG_CAN, payload);
   }
 
+  public static readonly MAX_PAYLOAD_SIZE = 256;
+
   /**
    * Wrap payload with magic bytes, length, checksum and trailer
    */
-  private static wrapPacket(cmd: BinaryCommand, payload: Uint8Array): Uint8Array {
+  public static wrapPacket(cmd: BinaryCommand, payload: Uint8Array): Uint8Array {
     const len = payload.length;
     const packet = new Uint8Array(2 + 1 + 2 + len + 1 + 2); // Magic(2) + Cmd(1) + Len(2) + Payload(N) + CS(1) + Trailer(2)
     
@@ -158,20 +160,31 @@ export class BinaryProtocol {
     packet[5 + len + 1] = this.TRAILER_BYTE_1;
     packet[5 + len + 2] = this.TRAILER_BYTE_2;
 
+    const hex = Array.from(packet).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+    console.log(`[PROTO-TX] CMD=0x${cmd.toString(16).padStart(2, '0').toUpperCase()} LEN=${len} HEX=${hex}`);
+
     return packet;
   }
 
   /**
-   * Parse incoming continuous byte stream and extract valid frames
+   * Parse incoming continuous byte stream and extract valid frames.
+   * Accurately preserves partial frames until subsequent data arrives.
    */
   public static parseStream(streamBuffer: Uint8Array): { packets: DecodedBinaryPacket[]; remainingBuffer: Uint8Array } {
     const packets: DecodedBinaryPacket[] = [];
     let i = 0;
 
-    while (i < streamBuffer.length - 7) {
+    while (i <= streamBuffer.length - 7) {
       if (streamBuffer[i] === this.MAGIC_BYTE_1 && streamBuffer[i + 1] === this.MAGIC_BYTE_2) {
         const cmd = streamBuffer[i + 2] as BinaryCommand;
         const len = (streamBuffer[i + 3] << 8) | streamBuffer[i + 4];
+
+        // Sanity check for corrupt or oversized payload lengths
+        if (len > this.MAX_PAYLOAD_SIZE) {
+          // Corrupted length, skip this magic and continue search
+          i++;
+          continue;
+        }
 
         const totalExpectedLength = 2 + 1 + 2 + len + 1 + 2;
         if (i + totalExpectedLength <= streamBuffer.length) {
@@ -185,11 +198,22 @@ export class BinaryProtocol {
 
           if (isValid) {
             const rawFrame = streamBuffer.slice(i, i + totalExpectedLength);
+            const hex = Array.from(rawFrame).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+            console.log(`[PROTO-RX] CMD=0x${cmd.toString(16).padStart(2, '0').toUpperCase()} LEN=${len} HEX=${hex}`);
+
             const decoded = this.decodePacket(cmd, payload, rawFrame);
             packets.push(decoded);
             i += totalExpectedLength;
             continue;
+          } else {
+            // Checksum or trailer mismatch, corrupted packet
+            console.warn(`[PROTO-RX] CORRUPTED_PACKET at offset ${i} (expected CS=0x${expectedCs.toString(16)}, got=0x${checksum.toString(16)})`);
           }
+        } else {
+          // Partial packet detected! We have found the start of a valid frame header
+          // but the complete payload + trailer hasn't arrived yet.
+          // Stop parsing and keep remainingBuffer from offset i.
+          break;
         }
       }
       i++;

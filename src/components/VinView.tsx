@@ -26,25 +26,61 @@ interface VinViewProps {
 
 export const VinView: React.FC<VinViewProps> = ({ status, vinInfo, setVinInfo, isMockMode = false }) => {
   const { t, isRtl } = useI18n();
-  const [manualVin, setManualVin] = useState<string>(vinInfo.rawVin || '4T1BF1FK5NU123456');
+  const [manualVin, setManualVin] = useState<string>(vinInfo.rawVin || '');
   const [isReading, setIsReading] = useState<boolean>(false);
+  const [readError, setReadError] = useState<string | null>(null);
 
   const handleReadVinFromEcu = async () => {
     setIsReading(true);
+    setReadError(null);
     try {
+      if (status !== 'CONNECTED' && !isMockMode) {
+        throw new Error('ESP32 NOT CONNECTED');
+      }
+
       // Send Mode 09 PID 02 (VIN request) via transportManager
       const resp = await transportManager.sendRequest([0x09, 0x02], '0x7E0');
-      let vinToDecode = manualVin;
+      
       if (isMockMode) {
-         vinToDecode = '4T1BF1FK5NU123456';
-      } else if (resp.status === 'SUCCESS' && resp.decodedData) {
-         vinToDecode = resp.decodedData; // In a real app, this should be the decoded ASCII from the response payload
+        const decoded = VinDecoder.decode('4T1BF1FK5NU123456');
+        setVinInfo(decoded);
+        setManualVin(decoded.rawVin);
+        return;
       }
-      const decoded = VinDecoder.decode(vinToDecode);
-      setVinInfo(decoded);
-      setManualVin(decoded.rawVin);
-    } catch {
-      //
+
+      if (resp.status === 'SUCCESS' && resp.responseRaw) {
+        const bytes = resp.responseRaw.split(' ').map(b => parseInt(b, 16));
+        // Mode 09 PID 02 response format: [0x49, 0x02, 0x01, V1, V2, ... V17]
+        let asciiChars: string[] = [];
+        let startIndex = 0;
+        if (bytes.length >= 20 && bytes[0] === 0x49 && bytes[1] === 0x02) {
+          startIndex = 3;
+        } else if (bytes.length >= 17) {
+          // Find first alphanumeric character
+          startIndex = bytes.findIndex(b => (b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x5A));
+          if (startIndex < 0) startIndex = 0;
+        }
+
+        for (let i = startIndex; i < bytes.length && asciiChars.length < 17; i++) {
+          const b = bytes[i];
+          if ((b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x5A)) {
+            asciiChars.push(String.fromCharCode(b));
+          }
+        }
+
+        const extractedVin = asciiChars.join('');
+        if (extractedVin.length === 17) {
+          const decoded = VinDecoder.decode(extractedVin);
+          setVinInfo(decoded);
+          setManualVin(decoded.rawVin);
+        } else {
+          setReadError(isRtl ? 'لم يتم استلام رقم شاسيه VIN صالح من وحدة التحكم (17 خانة)' : 'Incomplete VIN received from ECU (expected 17 characters)');
+        }
+      } else {
+        setReadError(isRtl ? 'فشل قراءة رقم الشاسيه: لا توجد استجابة من وحدة التحكم (Timeout)' : 'Failed to read VIN: ECU did not respond (Timeout / No Response)');
+      }
+    } catch (err: any) {
+      setReadError(err?.message || (isRtl ? 'حدث خطأ أثناء قراءة رقم الشاسيه' : 'Error reading VIN from vehicle'));
     } finally {
       setIsReading(false);
     }
@@ -81,6 +117,13 @@ export const VinView: React.FC<VinViewProps> = ({ status, vinInfo, setVinInfo, i
           <span>{isReading ? t('connecting') : t('btnReadVin')}</span>
         </button>
       </div>
+
+      {readError && (
+        <div className="bg-rose-950/50 border border-rose-800/80 rounded-xl p-3.5 text-xs text-rose-300 flex items-center gap-2.5">
+          <ShieldCheck className="h-4 w-4 text-rose-400 shrink-0" />
+          <span>{readError}</span>
+        </div>
+      )}
 
       {/* Search / Manual Input Bar */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-wrap items-center gap-3">

@@ -431,10 +431,14 @@ public class BluetoothSppPlugin extends Plugin {
                         byte[] readBuf = new byte[bytes];
                         System.arraycopy(buffer, 0, readBuf, 0, bytes);
 
+                        StringBuilder sb = new StringBuilder();
                         JSArray jsArr = new JSArray();
                         for (int i = 0; i < bytes; i++) {
-                            jsArr.put(readBuf[i] & 0xFF);
+                            int b = readBuf[i] & 0xFF;
+                            jsArr.put(b);
+                            sb.append(String.format("%02X ", b));
                         }
+                        Log.d(TAG, "[BT-RX] " + sb.toString().trim());
 
                         JSObject ret = new JSObject();
                         ret.put("data", jsArr);
@@ -467,9 +471,13 @@ public class BluetoothSppPlugin extends Plugin {
 
         try {
             byte[] buffer = new byte[dataArr.length()];
+            StringBuilder sb = new StringBuilder();
             for (int i = 0; i < dataArr.length(); i++) {
-                buffer[i] = (byte) dataArr.getInt(i);
+                int b = dataArr.getInt(i);
+                buffer[i] = (byte) b;
+                sb.append(String.format("%02X ", b & 0xFF));
             }
+            Log.d(TAG, "[BT-TX] " + sb.toString().trim());
 
             outputStream.write(buffer);
             outputStream.flush();

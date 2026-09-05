@@ -76,26 +76,34 @@ export const DtcView: React.FC<DtcViewProps> = ({
 
       // Send Mode 03 (Request Stored DTCs) via transportManager
       const resp = await transportManager.sendRequest([0x03], '0x7E0');
-      if (resp.status === 'SUCCESS' || isMockMode) {
-        let results: DiagnosticTroubleCode[] = [];
-        if (isMockMode) {
-          results = initialDtcDatabase.slice(0, 3);
-        } else if (resp.responseRaw) {
-          const bytes = resp.responseRaw.split(' ').map(b => parseInt(b, 16));
-          const dtcBytes = bytes[0] === 0x43 ? bytes.slice(2) : bytes;
-          results = DtcDecoder.parseDtcList(dtcBytes, 'CONFIRMED');
+      if (isMockMode) {
+        const results = initialDtcDatabase.slice(0, 3);
+        setDtcList(results);
+        return;
+      }
+
+      if (resp.status === 'SUCCESS' && resp.responseRaw) {
+        const bytes = resp.responseRaw.split(' ').map(b => parseInt(b, 16));
+        // Mode 03 response: [0x43, numberOfCodes, code1_H, code1_L, ...]
+        let dtcBytes: number[] = [];
+        if (bytes[0] === 0x43) {
+          dtcBytes = bytes.slice(2);
+        } else if (bytes.length > 0) {
+          dtcBytes = bytes;
         }
+
+        const results = DtcDecoder.parseDtcList(dtcBytes, 'CONFIRMED');
         setDtcList(results);
 
         if (user) {
           saveDiagnosticReport({
             id: `scan_${Date.now()}`,
-            rawVin: vinInfo?.rawVin || '4T1BF1FK5NU123456',
-            manufacturer: vinInfo?.manufacturer || 'Toyota',
-            model: vinInfo?.model || 'Camry',
-            year: vinInfo?.year || 2022,
-            country: vinInfo?.country || 'United States',
-            batteryVoltage: batteryVoltage || 14.15,
+            rawVin: vinInfo?.rawVin || 'UNKNOWN_VIN',
+            manufacturer: vinInfo?.manufacturer || 'Generic',
+            model: vinInfo?.model || 'OBD-II Vehicle',
+            year: vinInfo?.year || new Date().getFullYear(),
+            country: vinInfo?.country || 'Unknown',
+            batteryVoltage: batteryVoltage || 12.0,
             dtcCodes: results.map(d => d.code),
             status: 'Completed'
           }).catch(err => {
@@ -104,19 +112,23 @@ export const DtcView: React.FC<DtcViewProps> = ({
         }
       } else {
         setDtcList([]);
+        setConnectionError(isRtl
+          ? 'لم تستجب وحدة التحكم لأمر قراءة الأعطال (Mode 03). تأكد من تشغيل مفتاح السيارة (Ignition ON) وسلامة ناقل CAN.'
+          : 'ECU did not respond to Mode 03 request (Timeout). Verify vehicle Ignition is ON and CAN wiring is secure.'
+        );
       }
     } catch (err: any) {
       setDtcList([]);
       if (err?.message === 'NOT_CONNECTED') {
         setConnectionError(isRtl 
-          ? 'تنبيه: جهاز Hamza OBD Pro غير متصل بالسيارة. يرجى الدخول لمدير الاتصال وتوصيل محول ESP32، أو تفعيل "وضع المحاكاة" (Demo Mode) من شريط الأدوات العلوي لإجراء فحص افتراضي.' 
-          : 'Warning: Hamza OBD Pro is not connected to the vehicle. Please open the Connection Manager and connect your ESP32 adapter, or activate "Demo Mode" from the top header to run a simulated scan.'
+          ? 'تنبيه: جهاز Hamza OBD Pro غير متصل بالسيارة. يرجى توصيل محول ESP32 عبر البلوتوث أولاً.' 
+          : 'Warning: Hamza OBD Pro is not connected to the vehicle. Please connect your ESP32 adapter via Bluetooth first.'
         );
       } else {
-        setConnectionError(isRtl
-          ? 'حدث خطأ غير متوقع أثناء الفحص. يرجى التحقق من اتصال شبكة OBD-II وإعادة المحاولة.'
-          : 'An unexpected error occurred during the scan. Please verify OBD-II link connection and try again.'
-        );
+        setConnectionError(err?.message || (isRtl
+          ? 'حدث خطأ أثناء فحص الأعطال. تحقق من اتصال مقبس OBD-II.'
+          : 'An error occurred during DTC scan. Check OBD-II link.'
+        ));
       }
     } finally {
       setIsScanning(false);
@@ -125,19 +137,38 @@ export const DtcView: React.FC<DtcViewProps> = ({
 
   const handleConfirmClearDtc = async () => {
     setIsClearing(true);
+    setConnectionError(null);
     try {
-      // Send Mode 04 (Clear DTCs) via transportManager
-      const resp = await transportManager.sendRequest([0x04], '0x7E0');
-      if (resp.status === 'SUCCESS') {
+      if (status !== 'CONNECTED' && !isMockMode) {
+        throw new Error('NOT_CONNECTED');
+      }
+
+      if (isMockMode) {
         setDtcList([]);
         setShowClearModal(false);
-        setClearSuccessMessage(isRtl ? 'تم إرسال أمر مسح الأعطال (Mode 04) وإعادة ضبط مؤشر فحص المحرك بنجاح.' : 'DTCs Cleared and Check Engine Light reset successfully (Mode 04).');
+        setClearSuccessMessage(isRtl ? 'تم مسح الأعطال في وضع المحاكاة بنجاح.' : 'DTCs cleared in Demo Mode.');
+        return;
+      }
+
+      // Send Mode 04 (Clear DTCs) via transportManager
+      const resp = await transportManager.sendRequest([0x04], '0x7E0');
+      const isPositive = resp.status === 'SUCCESS' && (
+        !resp.responseRaw || 
+        resp.responseRaw.includes('44') || 
+        resp.responseRaw.startsWith('01 44')
+      );
+
+      if (isPositive) {
+        setDtcList([]);
+        setShowClearModal(false);
+        setClearSuccessMessage(isRtl ? 'تم إرسال أمر مسح الأعطال (Mode 04) وتأكيد الاستجابة (0x44) بنجاح.' : 'DTCs Cleared and positive response (0x44) received from ECU (Mode 04).');
       } else {
         setShowClearModal(false);
-        setConnectionError(isRtl ? 'فشل مسح الأعطال: لم تستجب وحدة التحكم' : 'Clear failed: ECU did not respond (0x44)');
+        setConnectionError(isRtl ? 'فشل مسح الأعطال: لم تستجب وحدة التحكم أو رفضت الطلب (NRC)' : 'Clear failed: ECU rejected request or did not respond (NRC / Timeout)');
       }
-    } catch {
-      //
+    } catch (err: any) {
+      setShowClearModal(false);
+      setConnectionError(err?.message || (isRtl ? 'فشل الاتصال أثناء مسح الأعطال' : 'Communication failure during DTC clear'));
     } finally {
       setIsClearing(false);
     }

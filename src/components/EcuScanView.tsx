@@ -33,9 +33,9 @@ export const EcuScanView: React.FC<EcuScanViewProps> = ({
   const [internalEcuList, setInternalEcuList] = useState<EcuInfo[]>(() =>
     KNOWN_ECU_NODES.map(node => ({
       ...node,
-      status: 'ONLINE',
-      dtcCount: node.id === 'ecu-engine' ? 2 : node.id === 'ecu-abs' ? 1 : 0,
-      supportedPidsCount: node.id === 'ecu-engine' ? 48 : node.id === 'ecu-trans' ? 24 : 16
+      status: isMockMode ? 'ONLINE' : 'UNKNOWN',
+      dtcCount: 0,
+      supportedPidsCount: 0
     }))
   );
 
@@ -64,8 +64,8 @@ export const EcuScanView: React.FC<EcuScanViewProps> = ({
       setActiveAddress(node.addressHex);
       setProgress(Math.round(((i + 1) / initialNodes.length) * 100));
 
-      // Send TesterPresent / Diagnostic Session request to address via transportManager
       try {
+        // Send TesterPresent / Diagnostic Session request to address via transportManager
         const resp = await transportManager.sendRequest([0x3E, 0x00], node.txIdHex);
         const isOnline = resp.status === 'SUCCESS';
 
@@ -75,8 +75,8 @@ export const EcuScanView: React.FC<EcuScanViewProps> = ({
               return {
                 ...item,
                 status: 'ONLINE',
-                dtcCount: item.id === 'ecu-engine' ? 3 : 0,
-                supportedPidsCount: item.id === 'ecu-engine' ? 48 : item.id === 'ecu-trans' ? 24 : 16
+                dtcCount: isMockMode && item.id === 'ecu-engine' ? 3 : 0,
+                supportedPidsCount: isMockMode && item.id === 'ecu-engine' ? 48 : 0
               };
             }
             return item;

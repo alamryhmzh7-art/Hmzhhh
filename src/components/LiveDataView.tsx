@@ -45,24 +45,8 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
       let currentTps = 18;
       let currentLoad = 26;
 
-      const isReallyConnected = status === 'CONNECTED' && !isMockMode;
-
-      if (isReallyConnected) {
-        try {
-          // Send real OBD Mode 01 PID request for RPM (0x0C)
-          const resp = await transportManager.sendRequest([0x01, 0x0C], '0x7E0');
-          if (resp.status === 'SUCCESS' && resp.responseRaw) {
-            const bytes = resp.responseRaw.split(' ').map(b => parseInt(b, 16));
-            // Mode 01 PID 0C response: [41, 0C, A, B] -> RPM = ((A * 256) + B) / 4
-            if (bytes.length >= 4 && bytes[0] === 0x41 && bytes[1] === 0x0C) {
-              currentRpm = Math.round(((bytes[2] * 256) + bytes[3]) / 4);
-            }
-          }
-        } catch {
-          // Fallback or retry on failure
-        }
-      } else {
-        // Simulation mode
+      if (isMockMode) {
+        // Simulation mode ONLY when Demo Mode is explicitly active
         currentRpm = Math.round(simRpm + (Math.sin(Date.now() / 1000) * 120) + (Math.random() * 30));
         currentSpeed = Math.max(0, Math.round(simSpeed + (Math.sin(Date.now() / 3000) * 4)));
         currentVolt = parseFloat((14.15 + Math.sin(Date.now() / 4000) * 0.12).toFixed(2));
@@ -72,6 +56,55 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
 
         mockEcuServer.setRpm(currentRpm);
         mockEcuServer.setSpeed(currentSpeed);
+      } else if (status === 'CONNECTED') {
+        // Strict REAL MODE: Poll real OBD Mode 01 PIDs from vehicle ECU
+        try {
+          // Poll RPM (PID 0x0C)
+          const respRpm = await transportManager.sendRequest([0x01, 0x0C], '0x7E0');
+          if (respRpm.status === 'SUCCESS' && respRpm.responseRaw) {
+            const bytes = respRpm.responseRaw.split(' ').map(b => parseInt(b, 16));
+            if (bytes.length >= 4 && bytes[0] === 0x41 && bytes[1] === 0x0C) {
+              currentRpm = Math.round(((bytes[2] * 256) + bytes[3]) / 4);
+            }
+          }
+
+          // Poll Speed (PID 0x0D)
+          const respSpeed = await transportManager.sendRequest([0x01, 0x0D], '0x7E0');
+          if (respSpeed.status === 'SUCCESS' && respSpeed.responseRaw) {
+            const bytes = respSpeed.responseRaw.split(' ').map(b => parseInt(b, 16));
+            if (bytes.length >= 3 && bytes[0] === 0x41 && bytes[1] === 0x0D) {
+              currentSpeed = bytes[2];
+            }
+          }
+
+          // Poll Coolant (PID 0x05)
+          const respCoolant = await transportManager.sendRequest([0x01, 0x05], '0x7E0');
+          if (respCoolant.status === 'SUCCESS' && respCoolant.responseRaw) {
+            const bytes = respCoolant.responseRaw.split(' ').map(b => parseInt(b, 16));
+            if (bytes.length >= 3 && bytes[0] === 0x41 && bytes[1] === 0x05) {
+              currentCoolant = bytes[2] - 40;
+            }
+          }
+
+          // Poll Module Voltage (PID 0x42)
+          const respVolt = await transportManager.sendRequest([0x01, 0x42], '0x7E0');
+          if (respVolt.status === 'SUCCESS' && respVolt.responseRaw) {
+            const bytes = respVolt.responseRaw.split(' ').map(b => parseInt(b, 16));
+            if (bytes.length >= 4 && bytes[0] === 0x41 && bytes[1] === 0x42) {
+              currentVolt = parseFloat((((bytes[2] * 256) + bytes[3]) / 1000).toFixed(2));
+            }
+          }
+        } catch {
+          // Timeout or communication drop in Real Mode -> do NOT inject fake values
+        }
+      } else {
+        // Disconnected in Real Mode -> keep at 0 / idle
+        currentRpm = 0;
+        currentSpeed = 0;
+        currentVolt = 0;
+        currentCoolant = 0;
+        currentTps = 0;
+        currentLoad = 0;
       }
 
       setPids(prev => prev.map(p => {
