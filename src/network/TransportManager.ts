@@ -252,6 +252,33 @@ export class TransportManager {
     }
   }
 
+  /**
+   * Fetch real battery voltage (Control Module Voltage) via OBD-II PID 0x42.
+   * Formula: ((A*256)+B)/1000 Volts
+   */
+  public async getBatteryVoltage(): Promise<number> {
+    if (!this.isConnected()) return 0.0;
+    
+    try {
+      // 01 42 = Mode 01, PID 42 (Control module voltage)
+      const response = await this.sendRequest([0x01, 0x42], '0x7DF');
+      if (response.status === 'SUCCESS' && response.responseRaw) {
+        const bytes = response.responseRaw.split(' ').map(h => parseInt(h, 16));
+        // PID 42 response: [41 42 A B]
+        if (bytes.length >= 4 && bytes[0] === 0x41 && bytes[1] === 0x42) {
+          const a = bytes[2];
+          const b = bytes[3];
+          const voltage = ((a * 256) + b) / 1000.0;
+          return parseFloat(voltage.toFixed(2));
+        }
+      }
+      return 0.0;
+    } catch (err) {
+      console.warn('[TM] Failed to fetch battery voltage:', err);
+      return 0.0;
+    }
+  }
+
   public async getCanStatus(): Promise<CanBusStatus> {
     return this.activeTransport.getCanStatus();
   }

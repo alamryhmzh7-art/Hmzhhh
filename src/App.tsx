@@ -54,6 +54,34 @@ const MainApp: React.FC = () => {
   const [batteryVoltage, setBatteryVoltage] = useState<number>(0.0);
 
   useEffect(() => {
+    let voltageTimer: any = null;
+
+    if (status === 'CONNECTED') {
+      // Initial checks
+      transportManager.getBatteryVoltage().then(v => {
+        if (v > 0) setBatteryVoltage(v);
+      });
+      
+      // Auto check link status on first connection
+      handleCheckCarLink();
+
+      // Poll every 10 seconds for real voltage
+      voltageTimer = setInterval(async () => {
+        const v = await transportManager.getBatteryVoltage();
+        if (v > 0) {
+          setBatteryVoltage(v);
+        }
+      }, 10000);
+    } else {
+      setBatteryVoltage(0.0);
+    }
+
+    return () => {
+      if (voltageTimer) clearInterval(voltageTimer);
+    };
+  }, [status]);
+
+  useEffect(() => {
     // Subscribe to Transport Manager state changes
     const unsub = transportManager.subscribeStatus((newStatus, transportType) => {
       setStatus(newStatus);
