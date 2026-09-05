@@ -63,22 +63,24 @@ export const DtcView: React.FC<DtcViewProps> = ({
     ];
 
     try {
-      for (const step of steps) {
-        await new Promise(resolve => setTimeout(resolve, 500));
-        setScanProgress(step.progress);
-        setScanStep(isRtl ? step.labelAr : step.labelEn);
-      }
-
-      // Check if we are in real mode and NOT connected
       if (status !== 'CONNECTED' && !isMockMode) {
         throw new Error('NOT_CONNECTED');
       }
 
+      setScanStep(isRtl ? 'جاري طلب أكواد الأعطال المخزنة (Mode 03)...' : 'Requesting stored DTCs (Mode 03)...');
+      setScanProgress(30);
+
       // Send Mode 03 (Request Stored DTCs) via transportManager
       const resp = await transportManager.sendRequest([0x03], '0x7DF');
+      
+      setScanProgress(70);
+      setScanStep(isRtl ? 'جاري معالجة استجابة ECU...' : 'Processing ECU response...');
+
       if (isMockMode) {
+        await new Promise(r => setTimeout(r, 800));
         const results = initialDtcDatabase.slice(0, 3);
         setDtcList(results);
+        setScanProgress(100);
         return;
       }
 
@@ -94,6 +96,7 @@ export const DtcView: React.FC<DtcViewProps> = ({
 
         const results = DtcDecoder.parseDtcList(dtcBytes, 'CONFIRMED');
         setDtcList(results);
+        setScanProgress(100);
 
         if (user) {
           saveDiagnosticReport({

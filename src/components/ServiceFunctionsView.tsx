@@ -48,22 +48,42 @@ export const ServiceFunctionsView: React.FC<ServiceFunctionsViewProps> = ({ stat
     const steps = isRtl ? selectedFunc.stepsAr : selectedFunc.stepsEn;
     setExecutionLog(steps.map((s, idx) => ({ step: s, status: idx === 0 ? 'RUNNING' : 'PENDING' })));
 
-    for (let i = 0; i < steps.length; i++) {
-      setCurrentStepIndex(i);
-      setExecutionLog(prev => prev.map((item, idx) => {
-        if (idx === i) return { ...item, status: 'RUNNING' };
-        if (idx < i) return { ...item, status: 'DONE' };
-        return item;
-      }));
+    try {
+      for (let i = 0; i < steps.length; i++) {
+        setCurrentStepIndex(i);
+        setExecutionLog(prev => prev.map((item, idx) => {
+          if (idx === i) return { ...item, status: 'RUNNING' };
+          if (idx < i) return { ...item, status: 'DONE' };
+          return item;
+        }));
 
-      // Simulate UDS RoutineControl exchange (0x31 0x01)
-      await transportManager.sendRequest([0x31, 0x01, 0x01, i + 1], '0x7E0');
-      await new Promise(r => setTimeout(r, 1200));
+        console.log(`[SERVICE-FUNC] Executing Step ${i + 1}: ${steps[i]}`);
+        
+        // Execute UDS RoutineControl Start (0x31 0x01) for this specific routine part
+        // Target can be 0x7E0 or specified by selectedFunc
+        const resp = await transportManager.sendRequest([0x31, 0x01, ...selectedFunc.routineIdHex.replace('0x', '').match(/.{1,2}/g)!.map(h => parseInt(h, 16)), i + 1], selectedFunc.ecuTarget === 'ECM' ? '0x7E0' : '0x7E0');
+        
+        if (resp.status !== 'SUCCESS') {
+          throw new Error(resp.error || 'ECU_TIMEOUT');
+        }
+
+        const respBytes = resp.responseRaw ? resp.responseRaw.split(' ').map(h => parseInt(h, 16)) : [];
+        if (respBytes[0] === 0x7F) {
+           throw new Error(`NRC_0x${respBytes[2]?.toString(16).toUpperCase() || '??'}`);
+        }
+
+        // Wait for routine completion if required (usually 1.5s - 3s)
+        await new Promise(r => setTimeout(r, 1500));
+      }
+
+      setExecutionLog(prev => prev.map(item => ({ ...item, status: 'DONE' })));
+      setIsCompleted(true);
+    } catch (err: any) {
+      console.error(`[SERVICE-FUNC] Execution Failed:`, err);
+      alert(`Service Routine Failed: ${err.message}`);
+    } finally {
+      setIsExecuting(false);
     }
-
-    setExecutionLog(prev => prev.map(item => ({ ...item, status: 'DONE' })));
-    setIsExecuting(false);
-    setIsCompleted(true);
   };
 
   return (

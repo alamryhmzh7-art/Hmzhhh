@@ -23,6 +23,7 @@ export interface ITransport {
   
   getState(): ConnectionStatus;
   isConnected(): boolean;
+  updateConfig(config: ConnectionConfig): void;
   
   connect(config?: Partial<ConnectionConfig>): Promise<boolean>;
   disconnect(): Promise<void>;

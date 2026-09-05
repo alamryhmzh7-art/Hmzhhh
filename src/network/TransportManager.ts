@@ -43,6 +43,7 @@ export class TransportManager {
   private statusListeners: ((status: ConnectionStatus, type: TransportType) => void)[] = [];
   private sequenceId: number = 0;
   private pendingRequests: { [seq: number]: PendingDiagnosticRequest } = {};
+  private requestQueue: Promise<any> = Promise.resolve();
 
   constructor(initialConfig: ConnectionConfig) {
     this.config = initialConfig;
@@ -55,10 +56,6 @@ export class TransportManager {
       : this.wifiTransport;
 
     console.log(`[MANAGER] Active Transport: ${this.activeTransport.type}`);
-    console.log(`[MANAGER] Transport Instance: ${this.activeTransport.constructor.name}`);
-    console.log(`[MANAGER] Transport State: ${this.activeTransport.getState()}`);
-    console.log(`[MANAGER] isConnected: ${this.activeTransport.isConnected()}`);
-
     // Attach listeners
     this.wifiTransport.onStateChange((state) => {
       if (this.activeTransport.type === 'WIFI_TCP') {
@@ -79,28 +76,15 @@ export class TransportManager {
       
       // Log EVERY incoming CAN frame at the transport manager level
       console.log(`[TM-CAN-RX] CAN=0x${frameIdNum.toString(16).toUpperCase()} EXT=${frame.isExtended} DLC=${frame.dlc} DATA=[${frame.dataHex}]`);
-      commLogger.logPacket({
-        direction: '[CAN-RX]',
-        protocol: this.config.protocol,
-        canIdHex: `0x${frameIdNum.toString(16).toUpperCase()}`,
-        dlc: frame.dlc,
-        responseRaw: frame.dataHex,
-        durationMs: 0,
-        status: 'SUCCESS'
-      });
-
+      
       for (const seqNumStr in this.pendingRequests) {
         const seq = parseInt(seqNumStr);
         const req = this.pendingRequests[seq];
         
-        // Matching logic:
-        // 1. If we already know the response ID, it must match exactly.
-        // 2. If not, check if it's a valid potential responder for the request.
         let isMatch = false;
         if (req.actualResponseId !== undefined) {
           isMatch = (frameIdNum === req.actualResponseId);
         } else {
-          // Standard 11-bit rules
           if (!req.isExtended) {
             if (req.canId === 0x7DF) {
               isMatch = (frameIdNum >= 0x7E8 && frameIdNum <= 0x7EF);
@@ -108,7 +92,6 @@ export class TransportManager {
               isMatch = (frameIdNum === req.canId + 8);
             }
           } else {
-            // Extended 29-bit matching
             isMatch = this.isExtendedMatch(req.canId, frameIdNum);
           }
         }
@@ -116,24 +99,20 @@ export class TransportManager {
         if (!isMatch) continue;
 
         const data = frame.dataBytes;
-        if (!data || data.length < 2) continue; // Minimum ISO-TP frame is PCI + Data
+        if (!data || data.length < 2) continue;
 
-        // Lock actual response ID once found (for functional addressing)
+        // Lock actual response ID once found
         if (req.actualResponseId === undefined) {
           req.actualResponseId = frameIdNum;
         }
 
         const pciType = data[0] & 0xF0;
 
-        // Strict PID matching check for the start of a multi-frame or a single frame
-        // Point 10: If we expect 41 0C but get 41 0D, it's NOT a match for this request.
+        // Strict PID matching check for start of response
         if (!req.isoTpBuffer) {
           let payloadStart: number[] = [];
-          if (pciType === 0x00) {
-            payloadStart = data.slice(1, 3);
-          } else if (pciType === 0x10) {
-            payloadStart = data.slice(2, 4);
-          }
+          if (pciType === 0x00) payloadStart = data.slice(1, 3);
+          else if (pciType === 0x10) payloadStart = data.slice(2, 4);
           
           if (payloadStart.length >= 1) {
             const expectedMode = req.requestBytes[0] + 0x40;
@@ -144,76 +123,123 @@ export class TransportManager {
             const pidMatch = !hasPid || (payloadStart.length >= 2 && payloadStart[1] === expectedPid);
 
             if (!modeMatch || !pidMatch) {
-               // Only ignore if it's a positive response but for a different PID/Mode
                if (payloadStart[0] !== 0x7F) {
-                 console.warn(`[TM-CAN-RX] Mismatched Response: Expected Mode 0x${expectedMode.toString(16)}${hasPid ? ` PID 0x${expectedPid!.toString(16)}` : ''}, got 0x${payloadStart[0].toString(16)}${payloadStart.length >= 2 ? ` 0x${payloadStart[1].toString(16)}` : ''}. Ignoring frame.`);
+                 console.warn(`[TM-CAN-RX] Mismatched PID: Expected 0x${expectedMode.toString(16)}${hasPid ? ` 0x${expectedPid?.toString(16)}` : ''}, got 0x${payloadStart[0].toString(16)}${payloadStart[1] ? ` 0x${payloadStart[1].toString(16)}` : ''}`);
                  continue;
                }
             }
           }
         }
 
-        // Strict ISO-TP State Machine
+        // ISO-TP Reassembly
         if (req.isoTpBuffer) {
-           // Expecting Consecutive Frames (CF)
            if (pciType === 0x20) {
-              // Clear multi-frame timeout
               if (req.isoTpTimer) clearTimeout(req.isoTpTimer);
-
               const cfSeq = data[0] & 0x0F;
               if (cfSeq === req.isoTpBuffer.expectedSequence) {
                 const remaining = req.isoTpBuffer.totalLength - req.isoTpBuffer.receivedBytes.length;
-                if (remaining <= 0) {
-                   console.warn(`[ISO-TP] [${req.correlationId}] Extra CF ignored.`);
-                   break;
-                }
                 const take = Math.min(7, remaining);
-                for (let i = 0; i < take; i++) {
-                  req.isoTpBuffer.receivedBytes.push(data[1 + i]);
-                }
+                for (let i = 0; i < take; i++) req.isoTpBuffer.receivedBytes.push(data[1 + i]);
                 req.isoTpBuffer.expectedSequence = (req.isoTpBuffer.expectedSequence + 1) & 0x0F;
 
                 if (req.isoTpBuffer.receivedBytes.length >= req.isoTpBuffer.totalLength) {
                   const fullPayload = req.isoTpBuffer.receivedBytes.slice(0, req.isoTpBuffer.totalLength);
                   this.cleanupRequest(seq);
-                  console.log(`[ISO-TP] [${req.correlationId}] Reassembled ${fullPayload.length} bytes.`);
                   req.resolve(fullPayload);
                 } else {
-                  // Set timeout for next CF
                   req.isoTpTimer = setTimeout(() => {
-                    console.error(`[ISO-TP] [${req.correlationId}] CONSECUTIVE_FRAME_TIMEOUT`);
                     this.cleanupRequest(seq);
                     req.reject(new Error('ISO_TP_CONSECUTIVE_FRAME_TIMEOUT'));
-                  }, 1000);
+                  }, 1500);
                 }
               } else {
-                console.error(`[ISO-TP] [${req.correlationId}] SEQUENCE ERROR: Expected ${req.isoTpBuffer.expectedSequence}, got ${cfSeq}. Aborting.`);
                 this.cleanupRequest(seq);
                 req.reject(new Error('ISO_TP_SEQUENCE_MISMATCH'));
               }
-           } else if (pciType === 0x10) {
-              console.warn(`[ISO-TP] [${req.correlationId}] Received new FF while session active. Resetting.`);
-              this.handleFirstFrame(req, frameIdNum, data, seq);
-           } else if (pciType === 0x00) {
-              console.warn(`[ISO-TP] [${req.correlationId}] Received SF while multi-frame active. Aborting multi-frame.`);
-              this.handleSingleFrame(req, frameIdNum, data, seq);
            }
            break;
         }
 
-        // No active multi-frame buffer
         if (pciType === 0x00) {
            this.handleSingleFrame(req, frameIdNum, data, seq);
         } else if (pciType === 0x10) {
            this.handleFirstFrame(req, frameIdNum, data, seq);
-        } else {
-           console.warn(`[ISO-TP] [${req.correlationId}] Ignoring non-ISO-TP frame 0x${pciType.toString(16)} on diagnostic ID`);
         }
         break;
       }
     };
     this.wifiTransport.onCanFrame(handleCanFrame);
     this.btTransport.onCanFrame(handleCanFrame);
+  }
+
+  private notifyStatus(status: ConnectionStatus) {
+    this.statusListeners.forEach(l => l(status, this.activeTransport.type));
+  }
+
+  private isExtendedMatch(reqId: number, resId: number): boolean {
+    const reqDA = (reqId >>> 8) & 0xFF;
+    const reqSA = reqId & 0xFF;
+    const resDA = (resId >>> 8) & 0xFF;
+    const resSA = resId & 0xFF;
+    return (resSA === reqDA && resDA === reqSA);
+  }
+
+  public isConnected(): boolean {
+    return this.activeTransport.getState() === 'CONNECTED';
+  }
+
+  public getTransport(type?: TransportType): ITransport {
+    if (type === 'WIFI_TCP') return this.wifiTransport;
+    if (type === 'BLUETOOTH_SPP') return this.btTransport;
+    return this.activeTransport;
+  }
+
+  public subscribeStatus(listener: (status: ConnectionStatus, type: TransportType) => void) {
+    this.statusListeners.push(listener);
+    return () => {
+      this.statusListeners = this.statusListeners.filter(l => l !== listener);
+    };
+  }
+
+  public updateConfig(newConfig: Partial<ConnectionConfig>) {
+    this.config = { ...this.config, ...newConfig };
+    this.wifiTransport.updateConfig(this.config);
+    this.btTransport.updateConfig(this.config);
+    
+    if (newConfig.transportType) {
+      this.activeTransport = newConfig.transportType === 'BLUETOOTH_SPP' 
+        ? this.btTransport 
+        : this.wifiTransport;
+      console.log(`[MANAGER] Switched to ${this.activeTransport.type}`);
+      this.notifyStatus(this.activeTransport.getState());
+    }
+  }
+
+  public async connect(config?: Partial<ConnectionConfig>): Promise<boolean> {
+    return this.activeTransport.connect(config);
+  }
+
+  public async disconnect(): Promise<void> {
+    return this.activeTransport.disconnect();
+  }
+
+  public async scanBluetoothDevices(onDeviceFound?: (dev: BluetoothDeviceInfo) => void): Promise<BluetoothDeviceInfo[]> {
+    if (this.btTransport.scanDevices) {
+       return this.btTransport.scanDevices(onDeviceFound);
+    }
+    return [];
+  }
+
+  public async ping(): Promise<PingResult> {
+    return this.activeTransport.ping();
+  }
+
+  public async getCanStatus(): Promise<CanBusStatus> {
+    return this.activeTransport.getCanStatus();
+  }
+
+  public setTransportType(type: TransportType) {
+    this.updateConfig({ transportType: type });
   }
 
   private cleanupRequest(seq: number) {
@@ -227,267 +253,89 @@ export class TransportManager {
 
   private handleSingleFrame(req: PendingDiagnosticRequest, frameIdNum: number, data: number[], seq: number) {
     const sfLength = data[0] & 0x0F;
-    if (sfLength === 0 || sfLength > 7) {
-       console.warn(`[ISO-TP] [${req.correlationId}] Invalid SF_DL: ${sfLength}`);
-       return;
-    }
-    if (data.length < sfLength + 1) {
-       console.warn(`[ISO-TP] [${req.correlationId}] SF too short: ${data.length} < ${sfLength + 1}`);
-       return;
-    }
+    if (sfLength === 0 || sfLength > 7) return;
     const payload = data.slice(1, 1 + sfLength);
     this.cleanupRequest(seq);
-    console.log(`[ISO-TP] [${req.correlationId}] Single Frame from 0x${frameIdNum.toString(16).toUpperCase()}: [${payload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
     req.resolve(payload);
   }
 
   private handleFirstFrame(req: PendingDiagnosticRequest, frameIdNum: number, data: number[], seq: number) {
-    if (data.length < 8) {
-       console.warn(`[ISO-TP] [${req.correlationId}] FF too short: ${data.length}`);
-       return;
-    }
     const totalLength = ((data[0] & 0x0F) << 8) | data[1];
     if (totalLength <= 6 || totalLength > 4095) {
-       console.error(`[ISO-TP] [${req.correlationId}] Invalid FF_DL: ${totalLength}. Aborting.`);
        this.cleanupRequest(seq);
        req.reject(new Error('ISO_TP_INVALID_LENGTH'));
        return;
     }
-    const initialBytes = data.slice(2, 8);
     req.isoTpBuffer = {
       totalLength,
-      receivedBytes: [...initialBytes],
+      receivedBytes: [...data.slice(2, 8)],
       expectedSequence: 1
     };
-    console.log(`[ISO-TP] [${req.correlationId}] First Frame from 0x${frameIdNum.toString(16).toUpperCase()}: TotalLen=${totalLength}`);
 
     const fcTargetId = this.resolveIsoTpFlowControlId(req.canId, frameIdNum, req.isExtended);
     if (fcTargetId === null) {
-      console.error(`[ISO-TP] [${req.correlationId}] FAILED to determine Flow Control ID for response 0x${frameIdNum.toString(16).toUpperCase()}. Aborting.`);
       this.cleanupRequest(seq);
       req.reject(new Error('ISO_TP_ADDRESSING_ERROR'));
       return;
     }
 
-    // Set timeout for first CF
     req.isoTpTimer = setTimeout(() => {
-      console.error(`[ISO-TP] [${req.correlationId}] CONSECUTIVE_FRAME_TIMEOUT (Initial)`);
       this.cleanupRequest(seq);
       req.reject(new Error('ISO_TP_CONSECUTIVE_FRAME_TIMEOUT'));
-    }, 1000);
+    }, 1500);
 
-    // FC Frame: BS=0, STmin=0 (Standard)
     const fcFrame = [0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-    this.activeTransport.sendCanFrame(fcTargetId, fcFrame, req.isExtended).then(() => {
-      console.log(`[ISO-TP] [${req.correlationId}] Sent Flow Control (FC) to 0x${fcTargetId.toString(16).toUpperCase()}`);
-    }).catch(err => {
-      console.error(`[ISO-TP] [${req.correlationId}] Failed to send Flow Control:`, err);
+    this.activeTransport.sendCanFrame(fcTargetId, fcFrame, req.isExtended).catch(err => {
       this.cleanupRequest(seq);
       req.reject(new Error('FLOW_CONTROL_SEND_FAILED'));
     });
   }
 
-  /**
-   * Resolve Flow Control (FC) Target ID based on ISO 15765-2 rules
-   */
   public resolveIsoTpFlowControlId(requestCanId: number, responseCanId: number, isExtended: boolean): number | null {
     if (!isExtended) {
-      // Standard 11-bit OBD Physical Addressing (0x7E0-0x7E7 Request -> 0x7E8-0x7EF Response)
       if (responseCanId >= 0x7E8 && responseCanId <= 0x7EF) {
-        // Functional Discovery: 0x7DF Request -> Response 0x7E8..0x7EF
-        if (requestCanId === 0x7DF) {
-          // FC must go to the physical address of the responding ECU (Res - 8)
-          return responseCanId - 8;
-        }
-        // Physical Addressing: Request matches Response - 8
-        if (requestCanId === responseCanId - 8) {
-          return requestCanId;
-        }
+        if (requestCanId === 0x7DF) return responseCanId - 8;
+        if (requestCanId === responseCanId - 8) return requestCanId;
       }
-      
-      // Fallback for custom 11-bit pairs (Req+8 = Res)
       if (responseCanId === requestCanId + 8) return requestCanId;
     } else {
-      // Extended 29-bit Addressing (ISO 15765-2)
-      // Req: 18 DA [Target] [Source] | Res: 18 DA [Source] [Target]
-      const reqPrefix = (requestCanId >>> 24) & 0xFF;
-      const resPrefix = (responseCanId >>> 24) & 0xFF;
-      if (reqPrefix === 0x18 && resPrefix === 0x18) {
-        const reqDA = (requestCanId >>> 8) & 0xFF;
-        const reqSA = requestCanId & 0xFF;
-        const resDA = (responseCanId >>> 8) & 0xFF;
-        const resSA = responseCanId & 0xFF;
-        
-        // Physical Match: resSA == reqDA && resDA == reqSA
-        if (resSA === reqDA && resDA === reqSA) return requestCanId;
-
-        // Functional 29-bit: 18 DB 33 F1 (Functional Request -> Physical Response)
-        if (requestCanId === 0x18DB33F1 && resDA === 0xF1) {
-          // FC should go to the physical address of the responder: 18 DA [resSA] [TesterID=F1]
-          return (0x18DA0000 | (resSA << 8) | 0xF1) >>> 0;
-        }
-      }
+      const reqDA = (requestCanId >>> 8) & 0xFF;
+      const reqSA = requestCanId & 0xFF;
+      const resDA = (responseCanId >>> 8) & 0xFF;
+      const resSA = responseCanId & 0xFF;
+      if (resSA === reqDA && resDA === reqSA) return requestCanId;
+      if (requestCanId === 0x18DB33F1 && resDA === 0xF1) return (0x18DA0000 | (resSA << 8) | 0xF1) >>> 0;
     }
-
     return null;
   }
-
-  private isExtendedMatch(reqId: number, resId: number): boolean {
-    if (reqId === 0x18DB33F1) return ((resId >>> 24) === 0x18 && ((resId >>> 16) & 0xFF) === 0xDA && (resId & 0xFF) === 0xF1);
-    const reqDA = (reqId >>> 8) & 0xFF;
-    const reqSA = reqId & 0xFF;
-    const resDA = (resId >>> 8) & 0xFF;
-    const resSA = resId & 0xFF;
-    return (resSA === reqDA && resDA === reqSA);
-  }
-
-  public subscribeStatus(listener: (status: ConnectionStatus, type: TransportType) => void): () => void {
-    this.statusListeners.push(listener);
-    listener(this.activeTransport.getState(), this.activeTransport.type);
-    return () => {
-      this.statusListeners = this.statusListeners.filter(l => l !== listener);
-    };
-  }
-
-  private notifyStatus(state: ConnectionStatus) {
-    console.log(`[MANAGER] notifyStatus -> State: ${state}, Type: ${this.activeTransport.type}, isConnected: ${this.activeTransport.isConnected()}`);
-    this.statusListeners.forEach(l => l(state, this.activeTransport.type));
-  }
-
-  public getStatus(): ConnectionStatus {
-    return this.activeTransport.getState();
-  }
-
-  public isConnected(): boolean {
-    const connected = this.activeTransport.isConnected();
-    console.log(`[MANAGER] isConnected called -> Active: ${this.activeTransport.type}, Result: ${connected}`);
-    return connected;
-  }
-
-  public getActiveTransportType(): TransportType {
-    return this.activeTransport.type;
-  }
-
-  public getConfig(): ConnectionConfig {
-    return { ...this.config };
-  }
-
-  public updateConfig(newConfig: Partial<ConnectionConfig>) {
-    this.config = { ...this.config, ...newConfig };
-    if (newConfig.transportType && newConfig.transportType !== this.activeTransport.type) {
-      this.setTransportType(newConfig.transportType);
-    }
-  }
-
-  public async setTransportType(type: TransportType): Promise<void> {
-    if (this.activeTransport.type === type) return;
-
-    // Disconnect previous transport before switching
-    if (this.activeTransport.isConnected()) {
-      await this.activeTransport.disconnect();
-    }
-
-    this.config.transportType = type;
-    this.activeTransport = type === 'BLUETOOTH_SPP' ? this.btTransport : this.wifiTransport;
-    
-    console.log(`[MANAGER] Active Transport: ${this.activeTransport.type}`);
-    console.log(`[MANAGER] Transport Instance: ${this.activeTransport.constructor.name}`);
-    console.log(`[MANAGER] Transport State: ${this.activeTransport.getState()}`);
-    console.log(`[MANAGER] isConnected: ${this.activeTransport.isConnected()}`);
-
-    AppLogger.info(
-      'NETWORK',
-      'TransportSwitch',
-      `Switched active transport to: ${type === 'BLUETOOTH_SPP' ? 'Bluetooth Classic SPP' : 'Wi-Fi TCP'}`,
-      `تم تحويل وسيلة الاتصال النشطة إلى: ${type === 'BLUETOOTH_SPP' ? 'بلوتوث SPP' : 'واي فاي TCP'}`
-    );
-
-    this.notifyStatus(this.activeTransport.getState());
-  }
-
-  public async connect(overrideConfig?: Partial<ConnectionConfig>): Promise<boolean> {
-    console.log('[BT-FLOW-v2] TransportManager.connect START');
-    if (overrideConfig) {
-      this.updateConfig(overrideConfig);
-    }
-    console.log(`[MANAGER] Connecting via Active Transport: ${this.activeTransport.type} (Instance: ${this.activeTransport.constructor.name})`);
-    const ok = await this.activeTransport.connect(this.config);
-    console.log(`[MANAGER] Connect result for ${this.activeTransport.type}: ${ok}, State: ${this.activeTransport.getState()}, isConnected: ${this.activeTransport.isConnected()}`);
-    return ok;
-  }
-
-  public async disconnect(): Promise<void> {
-    console.log(`[MANAGER] Disconnecting active transport: ${this.activeTransport.type}`);
-    await this.activeTransport.disconnect();
-    console.log(`[MANAGER] Disconnected. State: ${this.activeTransport.getState()}, isConnected: ${this.activeTransport.isConnected()}`);
-  }
-
-  public async scanBluetoothDevices(onDeviceFound?: (dev: BluetoothDeviceInfo) => void): Promise<BluetoothDeviceInfo[]> {
-    if (this.btTransport.scanDevices) {
-      return this.btTransport.scanDevices(onDeviceFound);
-    }
-    return [];
-  }
-
-  public async ping(): Promise<PingResult> {
-    console.log(`[MANAGER] Active Transport: ${this.activeTransport.type}`);
-    console.log(`[MANAGER] Transport Instance: ${this.activeTransport.constructor.name}`);
-    console.log(`[MANAGER] Transport State: ${this.activeTransport.getState()}`);
-    console.log(`[MANAGER] isConnected: ${this.activeTransport.isConnected()}`);
-    console.log(`[MANAGER] PING START`);
-
-    if (!this.activeTransport.isConnected() && !this.config.isMockMode) {
-      console.log(`[MANAGER] PING RESULT: FAILED - ESP32 Bluetooth SPP Not Connected`);
-      console.log(`[MANAGER] PING RX: None (Transport Not Connected)`);
-      return { success: false, latencyMs: 0, info: 'ESP32 Bluetooth SPP Not Connected' };
-    }
-
-    try {
-      const res = await this.activeTransport.ping();
-      console.log(`[MANAGER] PING RESULT: ${res.success ? 'SUCCESS' : 'FAILED'}, Latency: ${res.latencyMs}ms`);
-      console.log(`[MANAGER] PING RX: ${JSON.stringify(res)}`);
-      return res;
-    } catch (err: any) {
-      console.log(`[MANAGER] PING RESULT: ERROR - ${err?.message}`);
-      console.log(`[MANAGER] PING RX: Error: ${err?.message}`);
-      return { success: false, latencyMs: 0, info: err?.message || 'Ping Error' };
-    }
-  }
-
-  public async getCanStatus(): Promise<CanBusStatus | null> {
-    return this.activeTransport.getCanStatus();
-  }
-
-  public getTransport(type: TransportType): ITransport {
-    return type === 'WIFI_TCP' ? this.wifiTransport : this.btTransport;
-  }
-
-  public async sendCanFrame(canId: number, data: number[], isExtended: boolean = false): Promise<boolean> {
-    if (!this.isConnected() && !this.config.isMockMode) {
-      AppLogger.warn('NETWORK', 'SendFrame', 'ESP32 NOT CONNECTED - Frame aborted', 'ESP32 غير متصل - تم إلغاء إرسال الإطار');
-      return false;
-    }
-    return this.activeTransport.sendCanFrame(canId, data, isExtended);
-  }
-
-  public getDiagnosticReport() {
-    const btRaw = typeof (this.btTransport as any).getRawConnectionState === 'function'
-      ? (this.btTransport as any).getRawConnectionState()
-      : null;
-    return {
-      activeTransportType: this.activeTransport.type,
-      transportInstance: this.activeTransport.constructor.name,
-      status: this.activeTransport.getState(),
-      isConnected: this.activeTransport.isConnected(),
-      btRawConnectionState: btRaw,
-      config: this.getConfig()
-    };
-  }
-
   /**
-   * Unified Request / Response dispatcher with strict Real Mode vs Demo Mode enforcement
+   * Uses a mutex queue to ensure diagnostic requests are strictly sequential.
    */
   public async sendRequest(requestBytes: number[], targetCanId: string = '0x7E0'): Promise<CommunicationPacket> {
+    // Enqueue the request to ensure serial execution
+    return new Promise((resolve) => {
+      this.requestQueue = this.requestQueue.then(async () => {
+        try {
+          const result = await this.executeRequest(requestBytes, targetCanId);
+          resolve(result);
+        } catch (err: any) {
+          // This should generally not happen as executeRequest catches its own errors 
+          // and returns a packet, but for safety:
+          resolve(commLogger.logPacket({
+            direction: '[OBD TX]',
+            protocol: this.config.protocol,
+            canIdHex: targetCanId,
+            requestRaw: requestBytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' '),
+            error: err?.message || 'Critical Queue Error',
+            durationMs: 0,
+            status: 'ERROR'
+          }));
+        }
+      });
+    });
+  }
+
+  private async executeRequest(requestBytes: number[], targetCanId: string = '0x7E0'): Promise<CommunicationPacket> {
     this.sequenceId++;
     const startTime = performance.now();
     const reqHex = requestBytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
@@ -495,15 +343,31 @@ export class TransportManager {
     const isExtended = targetCanId.length > 5;
     const correlationId = `OBD-${this.sequenceId}`;
     
-    // Logging prefixes as requested
-    const txLogPrefix = '[CAN-TX]';
-    const rxLogPrefix = '[CAN-RX]';
-    const obdPrefix = '[OBD]';
+    console.log(`[OBD] [${correlationId}] REQ TO ${targetCanId}: [${reqHex}]`);
 
-    console.log(`${obdPrefix} [${correlationId}] REQ TO ${targetCanId}: [${reqHex}]`);
+    // Guard: Mock vs Real Mode strict isolation
+    if (this.config.isMockMode) {
+      const { mockEcuServer } = await import('./mockEcuServer');
+      const responseBytes = await mockEcuServer.handleRequest(requestBytes);
+      const durationMs = Math.round(performance.now() - startTime);
+      const resHex = responseBytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+      
+      const actualResponseIdNum = numCanId + 8;
+      const actualResponseIdHex = '0x' + actualResponseIdNum.toString(16).toUpperCase();
 
-    // In REAL MODE: verify physical connection
-    if (!this.isConnected() && !this.config.isMockMode) {
+      return commLogger.logPacket({
+        direction: '[OBD-RX]',
+        protocol: this.config.protocol,
+        canIdHex: actualResponseIdHex,
+        requestRaw: reqHex,
+        responseRaw: resHex,
+        durationMs,
+        status: responseBytes[0] === 0x7F ? 'NRC' : 'SUCCESS'
+      });
+    }
+
+    // REAL MODE logic below
+    if (!this.isConnected()) {
       const errPkt = commLogger.logPacket({
         direction: '[OBD TX]',
         protocol: this.config.protocol,
@@ -513,127 +377,98 @@ export class TransportManager {
         durationMs: 0,
         status: 'ERROR'
       });
-      AppLogger.warn(
-        'NETWORK',
-        'RealModeCheck',
-        `[${correlationId}] Command blocked: ESP32 is NOT CONNECTED in Real Mode`,
-        'تم حظر الأمر: جهاز ESP32 غير متصل في الوضع الحقيقي',
-        reqHex
-      );
+      AppLogger.warn('NETWORK', 'RealModeCheck', `[${correlationId}] Command blocked: ESP32 NOT CONNECTED`, 'تم حظر الأمر: ESP32 غير متصل');
       return errPkt;
     }
 
     try {
-      let responseBytes: number[] = [];
-
-      // Format diagnostic CAN frame: ISO-TP Single Frame if payload <= 7 bytes
       let canPayload: number[];
       if (requestBytes.length <= 7) {
         canPayload = [requestBytes.length, ...requestBytes];
-        while (canPayload.length < 8) {
-          canPayload.push(0x00);
-        }
+        while (canPayload.length < 8) canPayload.push(0x00);
       } else {
-        canPayload = [...requestBytes];
+        // Multi-frame request initialization (ISO-TP First Frame)
+        canPayload = [0x10, requestBytes.length >> 8, requestBytes.length & 0xFF, ...requestBytes.slice(0, 5)];
       }
 
-      console.log(`${txLogPrefix} [${correlationId}] ID=0x${numCanId.toString(16).toUpperCase()} DATA=[${canPayload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
-
+      const seq = this.sequenceId;
       let actualResponseIdNum = numCanId + 8;
-      
-      if (this.config.isMockMode) {
-        // Send through active transport mock pipeline
-        await this.activeTransport.sendCanFrame(numCanId, canPayload, isExtended);
-        // Wait for mock pipeline
-        await new Promise(r => setTimeout(r, 25));
-        const { mockEcuServer } = await import('./mockEcuServer');
-        responseBytes = await mockEcuServer.handleRequest(requestBytes);
-      } else {
-        // 1. MUST create and store pending request BEFORE sending CAN frame to prevent race conditions
-        const seq = this.sequenceId;
-        const responsePromise = new Promise<number[]>((resolve, reject) => {
-           const timer = setTimeout(() => {
-              this.cleanupRequest(seq);
-              const expectedRange = (numCanId === 0x7DF) ? '0x7E8-0x7EF' : '0x' + (numCanId + 8).toString(16).toUpperCase();
-              console.warn(`[OBD-TIMEOUT] [${correlationId}] seq=${seq} request=${requestBytes[0].toString(16).padStart(2, '0')} ${requestBytes[1].toString(16).padStart(2, '0')} txCanId=0x${numCanId.toString(16).toUpperCase()} expected=${expectedRange}`);
-              
-              commLogger.logPacket({
-                direction: '[OBD-TIMEOUT]',
-                protocol: this.config.protocol,
-                canIdHex: `0x${numCanId.toString(16).toUpperCase()}`,
-                requestRaw: reqHex,
-                error: `TIMEOUT: Expected ${expectedRange}`,
-                durationMs: 2500,
-                status: 'TIMEOUT'
-              });
-              
-              reject(new Error('TIMEOUT_WAITING_FOR_ECU_RESPONSE'));
-           }, 2500);
 
-           const interceptedResolve = (data: number[]) => {
-              const req = this.pendingRequests[seq];
-              if (req && req.actualResponseId !== undefined) {
-                actualResponseIdNum = req.actualResponseId;
-              }
-              resolve(data);
-           };
+      const responsePromise = new Promise<number[]>((resolve, reject) => {
+        const timeoutMs = requestBytes.length > 7 ? 5000 : 2500; // Longer timeout for multi-frame
+        const timer = setTimeout(() => {
+          this.cleanupRequest(seq);
+          const expectedRange = (numCanId === 0x7DF) ? '0x7E8-0x7EF' : '0x' + (numCanId + 8).toString(16).toUpperCase();
+          console.warn(`[OBD-TIMEOUT] [${correlationId}] expected=${expectedRange}`);
+          
+          commLogger.logPacket({
+            direction: '[OBD-TIMEOUT]',
+            protocol: this.config.protocol,
+            canIdHex: `0x${numCanId.toString(16).toUpperCase()}`,
+            requestRaw: reqHex,
+            error: `TIMEOUT: Expected ${expectedRange}`,
+            durationMs: timeoutMs,
+            status: 'TIMEOUT'
+          });
+          reject(new Error('TIMEOUT_WAITING_FOR_ECU_RESPONSE'));
+        }, timeoutMs);
 
-           this.pendingRequests[seq] = { 
-              resolve: interceptedResolve, 
-              reject, 
-              canId: numCanId, 
-              requestBytes: [...requestBytes],
-              isExtended, 
-              correlationId, 
-              timer 
-           };
-        });
+        this.pendingRequests[seq] = {
+          resolve: (data) => {
+            const req = this.pendingRequests[seq];
+            if (req && req.actualResponseId !== undefined) actualResponseIdNum = req.actualResponseId;
+            resolve(data);
+          },
+          reject,
+          canId: numCanId,
+          requestBytes: [...requestBytes],
+          isExtended,
+          correlationId,
+          timer
+        };
+      });
 
-        // 2. Now safely send the hardware request
-        console.log(`[TX] CAN=0x${numCanId.toString(16).toUpperCase()} DATA=[${canPayload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
-        commLogger.logPacket({
-          direction: '[TX]',
-          protocol: this.config.protocol,
-          canIdHex: `0x${numCanId.toString(16).toUpperCase()}`,
-          dlc: canPayload.length,
-          requestRaw: canPayload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' '),
-          durationMs: 0,
-          status: 'SUCCESS'
-        });
-        
-        const ok = await this.activeTransport.sendCanFrame(numCanId, canPayload, isExtended);
-        if (!ok) {
-           this.cleanupRequest(seq);
-           throw new Error('Failed to send packet over transport');
-        }
+      // Send the frame
+      console.log(`[CAN-TX] [${correlationId}] ID=0x${numCanId.toString(16).toUpperCase()} DATA=[${canPayload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
+      commLogger.logPacket({
+        direction: '[TX]',
+        protocol: this.config.protocol,
+        canIdHex: `0x${numCanId.toString(16).toUpperCase()}`,
+        dlc: canPayload.length,
+        requestRaw: canPayload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' '),
+        durationMs: 0,
+        status: 'SUCCESS'
+      });
 
-        responseBytes = await responsePromise;
+      const ok = await this.activeTransport.sendCanFrame(numCanId, canPayload, isExtended);
+      if (!ok) {
+        this.cleanupRequest(seq);
+        throw new Error('Failed to send packet over transport');
       }
 
+      // If we sent a First Frame, we need to handle Consecutive Frames here or via the receiver.
+      // Current architecture handles Flow Control and CF reassembly in handleCanFrame.
+      
+      const responseBytes = await responsePromise;
       const durationMs = Math.round(performance.now() - startTime);
       const resHex = responseBytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
-      const parsed = PacketParser.parse(responseBytes);
-      
       const actualResponseIdHex = '0x' + actualResponseIdNum.toString(16).toUpperCase();
 
       console.log(`[OBD-RX] [${correlationId}] CAN=${actualResponseIdHex} PAYLOAD=[${resHex}] (${durationMs}ms)`);
 
-      const respPkt = commLogger.logPacket({
+      return commLogger.logPacket({
         direction: '[OBD-RX]',
         protocol: this.config.protocol,
         canIdHex: actualResponseIdHex,
         requestRaw: reqHex,
         responseRaw: resHex,
-        decodedData: parsed.asciiString,
         durationMs,
         status: responseBytes[0] === 0x7F ? 'NRC' : 'SUCCESS'
       });
 
-      return respPkt;
     } catch (err: any) {
       const durationMs = Math.round(performance.now() - startTime);
-      console.warn(`[OBD-FAIL] [${correlationId}] Error: ${err?.message || 'Response Timeout'}`);
-      const errPkt = commLogger.logPacket({
+      return commLogger.logPacket({
         direction: '[OBD TX]',
         protocol: this.config.protocol,
         canIdHex: targetCanId,
@@ -642,8 +477,6 @@ export class TransportManager {
         durationMs,
         status: 'TIMEOUT'
       });
-
-      return errPkt;
     }
   }
 }

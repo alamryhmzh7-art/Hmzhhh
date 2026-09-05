@@ -70,11 +70,39 @@ export const EcuScanView: React.FC<EcuScanViewProps> = ({
         const isOnline = resp.status === 'SUCCESS';
 
         if (isOnline) {
+          let partNumber = '---';
+          let softwareVersion = '---';
+
+          if (!isMockMode) {
+             // Try to read Part Number (DID 0xF187) and SW Version (DID 0xF189)
+             try {
+                const respPart = await transportManager.sendRequest([0x22, 0xF1, 0x87], node.txIdHex);
+                if (respPart.status === 'SUCCESS' && respPart.responseRaw) {
+                   const bytes = respPart.responseRaw.split(' ').map(h => parseInt(h, 16));
+                   if (bytes[0] === 0x62) {
+                      partNumber = String.fromCharCode(...bytes.slice(3)).replace(/[^\x20-\x7E]/g, '');
+                   }
+                }
+
+                const respSw = await transportManager.sendRequest([0x22, 0xF1, 0x89], node.txIdHex);
+                if (respSw.status === 'SUCCESS' && respSw.responseRaw) {
+                   const bytes = respSw.responseRaw.split(' ').map(h => parseInt(h, 16));
+                   if (bytes[0] === 0x62) {
+                      softwareVersion = String.fromCharCode(...bytes.slice(3)).replace(/[^\x20-\x7E]/g, '');
+                   }
+                }
+             } catch (e) {
+                console.warn(`[ECU-SCAN] Failed to read detailed info for ${node.id}`);
+             }
+          }
+
           setEcuList(prev => prev.map((item, idx) => {
             if (idx === i) {
               return {
                 ...item,
                 status: 'ONLINE',
+                partNumber: isMockMode ? item.partNumber : partNumber,
+                softwareVersion: isMockMode ? item.softwareVersion : softwareVersion,
                 dtcCount: isMockMode && item.id === 'ecu-engine' ? 3 : 0,
                 supportedPidsCount: isMockMode && item.id === 'ecu-engine' ? 48 : 0
               };

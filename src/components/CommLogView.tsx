@@ -108,10 +108,11 @@ export const CommLogView: React.FC<CommLogViewProps> = ({ status }) => {
           data: csvData,
           directory: Directory.Documents,
           encoding: Encoding.UTF8,
+          recursive: true
         });
         
         await Toast.show({
-          text: `تم حفظ سجل التشخيص: ${fileName}`,
+          text: `تم حفظ سجل التشخيص بنجاح: Documents/${fileName}`,
           duration: 'long'
         });
         console.log('File saved:', result.uri);

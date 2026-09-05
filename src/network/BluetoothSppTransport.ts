@@ -64,6 +64,10 @@ export class BluetoothSppTransport implements ITransport {
     return this.status === 'CONNECTED';
   }
 
+  public updateConfig(config: ConnectionConfig) {
+    this.config = config;
+  }
+
   public onStateChange(callback: (state: ConnectionStatus, error?: string) => void): () => void {
     this.stateListeners.push(callback);
     callback(this.status);

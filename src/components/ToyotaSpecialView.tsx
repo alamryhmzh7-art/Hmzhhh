@@ -38,19 +38,40 @@ export const ToyotaSpecialView: React.FC<ToyotaSpecialViewProps> = ({ status, ba
     setShowWarningModal(false);
     setIsExecuting(true);
     setIsCompleted(false);
-
-    for (let i = 0; i < selectedProc.commandSequence.length; i++) {
-      setCurrentStepIdx(i);
-      const cmd = selectedProc.commandSequence[i];
-      const bytes = cmd.requestHex.split(' ').map(h => parseInt(h, 16));
-
-      await transportManager.sendRequest(bytes, selectedProc.targetEcuAddrHex);
-      await new Promise(r => setTimeout(r, cmd.delayMs));
-    }
-
-    setIsExecuting(false);
-    setIsCompleted(true);
     setCurrentStepIdx(-1);
+
+    try {
+      for (let i = 0; i < selectedProc.commandSequence.length; i++) {
+        setCurrentStepIdx(i);
+        const cmd = selectedProc.commandSequence[i];
+        const bytes = cmd.requestHex.split(' ').map(h => parseInt(h, 16));
+
+        console.log(`[TOYOTA-PROC] Executing Step ${i + 1}: ${cmd.description}`);
+        const resp = await transportManager.sendRequest(bytes, selectedProc.targetEcuAddrHex);
+        
+        if (resp.status !== 'SUCCESS') {
+          throw new Error(resp.error || 'ECU_TIMEOUT');
+        }
+
+        const respBytes = resp.responseRaw ? resp.responseRaw.split(' ').map(h => parseInt(h, 16)) : [];
+        if (respBytes[0] === 0x7F) {
+           throw new Error(`NRC_0x${respBytes[2]?.toString(16).toUpperCase() || '??'}`);
+        }
+
+        // Delay between steps as required by Toyota OEM spec
+        if (cmd.delayMs > 0) {
+          await new Promise(r => setTimeout(r, cmd.delayMs));
+        }
+      }
+      setIsCompleted(true);
+    } catch (err: any) {
+      console.error(`[TOYOTA-PROC] Failed at step ${currentStepIdx + 1}:`, err);
+      // We could add an error state here if needed
+      alert(`Procedure Failed: ${err.message}`);
+    } finally {
+      setIsExecuting(false);
+      setCurrentStepIdx(-1);
+    }
   };
 
   return (
