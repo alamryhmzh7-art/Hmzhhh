@@ -176,11 +176,11 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
   const coolantPid = pids.find(p => p.pidHex === '05') || pids[2];
   const voltagePid = pids.find(p => p.pidHex === '42') || pids[5];
 
-  const rpmVal = typeof rpmPid?.currentValue === 'number' && !isNaN(rpmPid.currentValue) ? rpmPid.currentValue : 0;
+  const rpmVal = typeof rpmPid?.currentValue === 'number' && !isNaN(rpmPid.currentValue) ? rpmPid.currentValue : null;
   const rpmMin = typeof rpmPid?.minValue === 'number' && !isNaN(rpmPid.minValue) ? rpmPid.minValue : 0;
   const rpmMax = typeof rpmPid?.maxValue === 'number' && !isNaN(rpmPid.maxValue) ? rpmPid.maxValue : 8000;
 
-  const speedVal = typeof speedPid?.currentValue === 'number' && !isNaN(speedPid.currentValue) ? speedPid.currentValue : 0;
+  const speedVal = typeof speedPid?.currentValue === 'number' && !isNaN(speedPid.currentValue) ? speedPid.currentValue : null;
   const speedMin = typeof speedPid?.minValue === 'number' && !isNaN(speedPid.minValue) ? speedPid.minValue : 0;
   const speedMax = typeof speedPid?.maxValue === 'number' && !isNaN(speedPid.maxValue) ? speedPid.maxValue : 260;
 
@@ -258,7 +258,7 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
                   r="42"
                   className="stroke-cyan-500 transition-all duration-300 ease-out"
                   strokeWidth="8"
-                  strokeDasharray={`${(rpmVal / 8000) * 264} 264`}
+                  strokeDasharray={`${(rpmVal !== null ? (rpmVal / 8000) * 264 : 0)} 264`}
                   strokeLinecap="round"
                   fill="none"
                 />
@@ -280,7 +280,7 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
               </div>
               <div>
                 <span className="text-slate-500 block">{t('currentVal')}</span>
-                <span className="text-cyan-400 font-bold">{Math.round(rpmVal)}</span>
+                <span className="text-cyan-400 font-bold">{rpmVal !== null ? Math.round(rpmVal) : 'N/A'}</span>
               </div>
               <div>
                 <span className="text-slate-500 block">{t('maxVal')}</span>
@@ -316,7 +316,7 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
                   r="42"
                   className="stroke-emerald-500 transition-all duration-300 ease-out"
                   strokeWidth="8"
-                  strokeDasharray={`${(speedVal / 260) * 264} 264`}
+                  strokeDasharray={`${(speedVal !== null ? (speedVal / 260) * 264 : 0)} 264`}
                   strokeLinecap="round"
                   fill="none"
                 />
@@ -338,7 +338,7 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
               </div>
               <div>
                 <span className="text-slate-500 block">{t('currentVal')}</span>
-                <span className="text-emerald-400 font-bold">{Math.round(speedVal)}</span>
+                <span className="text-emerald-400 font-bold">{speedVal !== null ? Math.round(speedVal) : 'N/A'}</span>
               </div>
               <div>
                 <span className="text-slate-500 block">{t('maxVal')}</span>
