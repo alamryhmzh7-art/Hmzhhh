@@ -15,6 +15,7 @@ import { BluetoothSppTransport } from './BluetoothSppTransport';
 import { commLogger, AppLogger } from '../logging/logger';
 import { canManager } from '../can/canManager';
 import { PacketParser } from './TcpClient';
+import { IsoTpProtocol, IsoTpFrameType, FlowStatus } from '../isotp/isoTpProtocol';
 
 interface PendingDiagnosticRequest {
   resolve: (data: number[]) => void;
@@ -71,13 +72,16 @@ export class TransportManager {
 
     const handleCanFrame = (frame: CanFrame) => {
       const frameIdNum = parseInt(frame.id.replace('0x', ''), 16);
-      for (const seq in this.pendingRequests) {
+      for (const seqNumStr in this.pendingRequests) {
+        const seq = parseInt(seqNumStr);
         const req = this.pendingRequests[seq];
         const expectedResponseId = req.canId + 8;
         
-        // Strict matching: 0x7DF matches any ECU response 0x7E8-0x7EF; targeted IDs match exact req.canId + 8
+        // Matching logic
         const isMatch = (req.canId === 0x7DF && frameIdNum >= 0x7E8 && frameIdNum <= 0x7EF) ||
-                        (frameIdNum === expectedResponseId);
+                        (frameIdNum === expectedResponseId) ||
+                        (req.isExtended && this.isExtendedMatch(req.canId, frameIdNum));
+
         if (!isMatch) continue;
 
         const data = frame.dataBytes;
@@ -85,84 +89,162 @@ export class TransportManager {
 
         const pciType = data[0] & 0xF0;
 
-        // Case 1: ISO-TP Single Frame (0x00 - 0x0F)
+        // Strict ISO-TP State Machine
+        if (req.isoTpBuffer) {
+           // Expecting Consecutive Frames (CF)
+           if (pciType === 0x20) {
+              const cfSeq = data[0] & 0x0F;
+              if (cfSeq === req.isoTpBuffer.expectedSequence) {
+                const remaining = req.isoTpBuffer.totalLength - req.isoTpBuffer.receivedBytes.length;
+                if (remaining <= 0) {
+                   console.warn(`[ISO-TP] [${req.correlationId}] Extra CF ignored.`);
+                   break;
+                }
+                const take = Math.min(7, remaining);
+                for (let i = 0; i < take; i++) {
+                  req.isoTpBuffer.receivedBytes.push(data[1 + i]);
+                }
+                req.isoTpBuffer.expectedSequence = (req.isoTpBuffer.expectedSequence + 1) & 0x0F;
+
+                if (req.isoTpBuffer.receivedBytes.length >= req.isoTpBuffer.totalLength) {
+                  const fullPayload = req.isoTpBuffer.receivedBytes.slice(0, req.isoTpBuffer.totalLength);
+                  clearTimeout(req.timer);
+                  delete this.pendingRequests[seq];
+                  console.log(`[ISO-TP] [${req.correlationId}] Reassembled ${fullPayload.length} bytes.`);
+                  req.resolve(fullPayload);
+                }
+              } else {
+                console.error(`[ISO-TP] [${req.correlationId}] SEQUENCE ERROR: Expected ${req.isoTpBuffer.expectedSequence}, got ${cfSeq}. Aborting.`);
+                clearTimeout(req.timer);
+                delete this.pendingRequests[seq];
+                req.reject(new Error('ISO_TP_SEQUENCE_MISMATCH'));
+              }
+           } else if (pciType === 0x10) {
+              // Restarting multi-frame session on same ID?
+              console.warn(`[ISO-TP] [${req.correlationId}] Received new FF while session active. Resetting.`);
+              this.handleFirstFrame(req, frameIdNum, data, seq);
+           } else if (pciType === 0x00) {
+              // Received SF while multi-frame session active? 
+              console.warn(`[ISO-TP] [${req.correlationId}] Received SF while multi-frame active. Aborting multi-frame.`);
+              this.handleSingleFrame(req, frameIdNum, data, seq);
+           } else {
+              console.warn(`[ISO-TP] [${req.correlationId}] Unexpected PCI 0x${pciType.toString(16)} during CF session.`);
+           }
+           break;
+        }
+
+        // No active multi-frame buffer
         if (pciType === 0x00) {
-          const sfLength = data[0] & 0x0F;
-          // In some implementations, if len is 0, byte 1 might be the length (ISO 15765-2:2016)
-          // but for standard OBD, byte 0 [0:3] is length.
-          const payload = (sfLength > 0 && sfLength <= 7) ? data.slice(1, 1 + sfLength) : data.slice(1);
-          clearTimeout(req.timer);
-          delete this.pendingRequests[seq];
-          console.log(`[ISO-TP] [${req.correlationId}] Single Frame from 0x${frameIdNum.toString(16).toUpperCase()}: Payload=[${payload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
-          req.resolve(payload);
-          break;
+           this.handleSingleFrame(req, frameIdNum, data, seq);
+        } else if (pciType === 0x10) {
+           this.handleFirstFrame(req, frameIdNum, data, seq);
+        } else {
+           // Raw fallback only if explicitly not ISO-TP
+           console.log(`[CAN-RX] [${req.correlationId}] Raw Frame: 0x${frameIdNum.toString(16).toUpperCase()}`);
+           clearTimeout(req.timer);
+           delete this.pendingRequests[seq];
+           req.resolve(data);
         }
-
-        // Case 2: ISO-TP First Frame (0x10) -> Multi-frame starts
-        if (pciType === 0x10 && data.length >= 8) {
-          const totalLength = ((data[0] & 0x0F) << 8) | data[1];
-          const initialBytes = data.slice(2, 8);
-          req.isoTpBuffer = {
-            totalLength,
-            receivedBytes: [...initialBytes],
-            expectedSequence: 1
-          };
-          console.log(`[ISO-TP] [${req.correlationId}] First Frame from 0x${frameIdNum.toString(16).toUpperCase()}: TotalLen=${totalLength}`);
-
-          /**
-           * Determine Flow Control (FC) Target ID:
-           * If we sent to 0x7DF and got response from 0x7E8, FC must go to 0x7E0.
-           * Rule: Physical Request ID = Response ID - 8
-           */
-          const fcTargetId = frameIdNum - 8;
-          const fcFrame = [0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-          
-          this.activeTransport.sendCanFrame(fcTargetId, fcFrame, req.isExtended).then(() => {
-            console.log(`[ISO-TP] [${req.correlationId}] Sent Flow Control (FC) to 0x${fcTargetId.toString(16).toUpperCase()}`);
-          }).catch(err => {
-            console.error(`[ISO-TP] [${req.correlationId}] Failed to send Flow Control:`, err);
-          });
-          break;
-        }
-
-        // Case 3: ISO-TP Consecutive Frame (0x20)
-        if (pciType === 0x20 && req.isoTpBuffer) {
-          const seqNum = data[0] & 0x0F;
-          if (seqNum === req.isoTpBuffer.expectedSequence) {
-            const remaining = req.isoTpBuffer.totalLength - req.isoTpBuffer.receivedBytes.length;
-            const take = Math.min(7, remaining);
-            for (let i = 0; i < take; i++) {
-              req.isoTpBuffer.receivedBytes.push(data[1 + i]);
-            }
-            req.isoTpBuffer.expectedSequence = (req.isoTpBuffer.expectedSequence + 1) & 0x0F;
-
-            if (req.isoTpBuffer.receivedBytes.length >= req.isoTpBuffer.totalLength) {
-              const fullPayload = [...req.isoTpBuffer.receivedBytes];
-              clearTimeout(req.timer);
-              delete this.pendingRequests[seq];
-              console.log(`[ISO-TP] [${req.correlationId}] Multi-frame complete (${fullPayload.length} bytes)`);
-              req.resolve(fullPayload);
-            }
-          } else {
-            console.warn(`[ISO-TP] [${req.correlationId}] Sequence mismatch: expected ${req.isoTpBuffer.expectedSequence}, got ${seqNum}`);
-            // In a real implementation, we might send an error or abort, but here we just wait or timeout
-          }
-          break;
-        }
-
-        // Case 4: Non-ISO-TP or unhandled frame
-        // If we were expecting ISO-TP but got something else on the same ID, decide if we resolve it
-        if (!req.isoTpBuffer) {
-          clearTimeout(req.timer);
-          delete this.pendingRequests[seq];
-          console.log(`[CAN-RX] [${req.correlationId}] Raw Frame from 0x${frameIdNum.toString(16).toUpperCase()}: [${data.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
-          req.resolve(data);
-          break;
-        }
+        break;
       }
     };
     this.wifiTransport.onCanFrame(handleCanFrame);
     this.btTransport.onCanFrame(handleCanFrame);
+  }
+
+  private handleSingleFrame(req: PendingDiagnosticRequest, frameIdNum: number, data: number[], seq: number) {
+    const sfLength = data[0] & 0x0F;
+    if (sfLength === 0 || sfLength > 7) {
+       console.warn(`[ISO-TP] [${req.correlationId}] Invalid SF_DL: ${sfLength}`);
+       return;
+    }
+    const payload = data.slice(1, 1 + sfLength);
+    clearTimeout(req.timer);
+    delete this.pendingRequests[seq];
+    console.log(`[ISO-TP] [${req.correlationId}] Single Frame from 0x${frameIdNum.toString(16).toUpperCase()}: [${payload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
+    req.resolve(payload);
+  }
+
+  private handleFirstFrame(req: PendingDiagnosticRequest, frameIdNum: number, data: number[], seq: number) {
+    const totalLength = ((data[0] & 0x0F) << 8) | data[1];
+    if (totalLength <= 6 || totalLength > 4095) {
+       console.error(`[ISO-TP] [${req.correlationId}] Invalid FF_DL: ${totalLength}. Aborting.`);
+       clearTimeout(req.timer);
+       delete this.pendingRequests[seq];
+       req.reject(new Error('ISO_TP_INVALID_LENGTH'));
+       return;
+    }
+    const initialBytes = data.slice(2, 8);
+    req.isoTpBuffer = {
+      totalLength,
+      receivedBytes: [...initialBytes],
+      expectedSequence: 1
+    };
+    console.log(`[ISO-TP] [${req.correlationId}] First Frame from 0x${frameIdNum.toString(16).toUpperCase()}: TotalLen=${totalLength}`);
+
+    const fcTargetId = this.resolveIsoTpFlowControlId(req.canId, frameIdNum);
+    if (fcTargetId === null) {
+      console.error(`[ISO-TP] [${req.correlationId}] FAILED to determine Flow Control ID for response 0x${frameIdNum.toString(16).toUpperCase()}. Aborting.`);
+      clearTimeout(req.timer);
+      delete this.pendingRequests[seq];
+      req.reject(new Error('ISO_TP_ADDRESSING_ERROR'));
+      return;
+    }
+
+    // FC Frame: BS=0, STmin=0 (Standard)
+    const fcFrame = [0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+    this.activeTransport.sendCanFrame(fcTargetId, fcFrame, req.isExtended).then(() => {
+      console.log(`[ISO-TP] [${req.correlationId}] Sent Flow Control (FC) to 0x${fcTargetId.toString(16).toUpperCase()}`);
+    }).catch(err => {
+      console.error(`[ISO-TP] [${req.correlationId}] Failed to send Flow Control:`, err);
+      clearTimeout(req.timer);
+      delete this.pendingRequests[seq];
+      req.reject(new Error('FLOW_CONTROL_SEND_FAILED'));
+    });
+  }
+
+  /**
+   * Resolve Flow Control (FC) Target ID based on ISO 15765-2 rules
+   */
+  public resolveIsoTpFlowControlId(requestCanId: number, responseCanId: number): number | null {
+    // Standard 11-bit OBD Physical Addressing (0x7E0-0x7E7 Request -> 0x7E8-0x7EF Response)
+    if (responseCanId >= 0x7E8 && responseCanId <= 0x7EF) {
+      if (requestCanId === 0x7DF) return responseCanId - 8;
+      if (requestCanId === responseCanId - 8) return requestCanId;
+    }
+
+    // Extended 29-bit Addressing (ISO 15765-2)
+    // Req: 18 DA [Target] [Source] | Res: 18 DA [Source] [Target]
+    if (requestCanId > 0x7FF && responseCanId > 0x7FF) {
+      const reqPrefix = (requestCanId >>> 24) & 0xFF;
+      const resPrefix = (responseCanId >>> 24) & 0xFF;
+      if (reqPrefix === 0x18 && resPrefix === 0x18) {
+        const reqDA = (requestCanId >>> 8) & 0xFF;
+        const reqSA = requestCanId & 0xFF;
+        const resDA = (responseCanId >>> 8) & 0xFF;
+        const resSA = responseCanId & 0xFF;
+        
+        if (resSA === reqDA && resDA === reqSA) return requestCanId;
+        if (requestCanId === 0x18DB33F1 && resDA === 0xF1) {
+          // Functional 29-bit responded by physical ECU
+          return (0x18DA0000 | (resSA << 8) | 0xF1) >>> 0;
+        }
+      }
+    }
+
+    // Fallback for custom 11-bit pairs (Req+8 = Res)
+    if (responseCanId === requestCanId + 8) return requestCanId;
+
+    return null;
+  }
+
+  private isExtendedMatch(reqId: number, resId: number): boolean {
+    if (reqId === 0x18DB33F1) return ((resId >>> 24) === 0x18 && ((resId >>> 16) & 0xFF) === 0xDA && (resId & 0xFF) === 0xF1);
+    const reqDA = (reqId >>> 8) & 0xFF;
+    const reqSA = reqId & 0xFF;
+    const resDA = (resId >>> 8) & 0xFF;
+    const resSA = resId & 0xFF;
+    return (resSA === reqDA && resDA === reqSA);
   }
 
   public subscribeStatus(listener: (status: ConnectionStatus, type: TransportType) => void): () => void {

@@ -75,7 +75,7 @@ export const DtcView: React.FC<DtcViewProps> = ({
       }
 
       // Send Mode 03 (Request Stored DTCs) via transportManager
-      const resp = await transportManager.sendRequest([0x03], '0x7E0');
+      const resp = await transportManager.sendRequest([0x03], '0x7DF');
       if (isMockMode) {
         const results = initialDtcDatabase.slice(0, 3);
         setDtcList(results);
@@ -151,7 +151,7 @@ export const DtcView: React.FC<DtcViewProps> = ({
       }
 
       // Send Mode 04 (Clear DTCs) via transportManager
-      const resp = await transportManager.sendRequest([0x04], '0x7E0');
+      const resp = await transportManager.sendRequest([0x04], '0x7DF');
       const isPositive = resp.status === 'SUCCESS' && (
         !resp.responseRaw || 
         resp.responseRaw.includes('44') || 

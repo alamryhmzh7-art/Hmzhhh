@@ -60,7 +60,7 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
         // Strict REAL MODE: Poll real OBD Mode 01 PIDs from vehicle ECU
         try {
           // Poll RPM (PID 0x0C)
-          const respRpm = await transportManager.sendRequest([0x01, 0x0C], '0x7E0');
+          const respRpm = await transportManager.sendRequest([0x01, 0x0C], '0x7DF');
           if (respRpm.status === 'SUCCESS' && respRpm.responseRaw) {
             const bytes = respRpm.responseRaw.split(' ').map(b => parseInt(b, 16));
             if (bytes.length >= 4 && bytes[0] === 0x41 && bytes[1] === 0x0C) {
@@ -69,7 +69,7 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
           }
 
           // Poll Speed (PID 0x0D)
-          const respSpeed = await transportManager.sendRequest([0x01, 0x0D], '0x7E0');
+          const respSpeed = await transportManager.sendRequest([0x01, 0x0D], '0x7DF');
           if (respSpeed.status === 'SUCCESS' && respSpeed.responseRaw) {
             const bytes = respSpeed.responseRaw.split(' ').map(b => parseInt(b, 16));
             if (bytes.length >= 3 && bytes[0] === 0x41 && bytes[1] === 0x0D) {
@@ -78,7 +78,7 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
           }
 
           // Poll Coolant (PID 0x05)
-          const respCoolant = await transportManager.sendRequest([0x01, 0x05], '0x7E0');
+          const respCoolant = await transportManager.sendRequest([0x01, 0x05], '0x7DF');
           if (respCoolant.status === 'SUCCESS' && respCoolant.responseRaw) {
             const bytes = respCoolant.responseRaw.split(' ').map(b => parseInt(b, 16));
             if (bytes.length >= 3 && bytes[0] === 0x41 && bytes[1] === 0x05) {
@@ -87,7 +87,7 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
           }
 
           // Poll Module Voltage (PID 0x42)
-          const respVolt = await transportManager.sendRequest([0x01, 0x42], '0x7E0');
+          const respVolt = await transportManager.sendRequest([0x01, 0x42], '0x7DF');
           if (respVolt.status === 'SUCCESS' && respVolt.responseRaw) {
             const bytes = respVolt.responseRaw.split(' ').map(b => parseInt(b, 16));
             if (bytes.length >= 4 && bytes[0] === 0x41 && bytes[1] === 0x42) {

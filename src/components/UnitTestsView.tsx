@@ -263,26 +263,34 @@ export const UnitTestsView: React.FC = () => {
     // Run Test 11: ISO-TP Flow Control ID Mapping
     setTests(prev => prev.map(t => (t.id === 'test-isotp-fc-logic' ? { ...t, status: 'RUNNING' } : t)));
     const t11Start = performance.now();
-    // Simulate First Frame from 0x7E8 (Physical ECU)
-    // Response ID: 0x7E8 -> FC Target ID should be 0x7E0
-    const frameIdNum = 0x7E8;
-    const fcTargetId = frameIdNum - 8;
-    const t11Pass = fcTargetId === 0x7E0;
+    
+    // Case A: Standard Physical
+    const fcA = transportManager.resolveIsoTpFlowControlId(0x7E0, 0x7E8);
+    // Case B: Standard Physical 2
+    const fcB = transportManager.resolveIsoTpFlowControlId(0x7E1, 0x7E9);
+    // Case C: Functional Addressing
+    const fcC = transportManager.resolveIsoTpFlowControlId(0x7DF, 0x7E8);
+    // Case D: Extended 29-bit Physical
+    const fcD = transportManager.resolveIsoTpFlowControlId(0x18DA10F1, 0x18DAF110);
+    // Case E: Extended 29-bit Functional
+    const fcE = transportManager.resolveIsoTpFlowControlId(0x18DB33F1, 0x18DAF110);
+    
+    const t11Pass = (fcA === 0x7E0) && (fcB === 0x7E1) && (fcC === 0x7E0) && (fcD === 0x18DA10F1) && (fcE === 0x18DA10F1);
     const t11Duration = Math.round(performance.now() - t11Start);
     setTests(prev => prev.map(t => (t.id === 'test-isotp-fc-logic' ? { ...t, status: t11Pass ? 'PASS' : 'FAIL', executionTimeMs: t11Duration } : t)));
 
     await new Promise(r => setTimeout(r, 80));
 
-    // Run Test 12: Binary Protocol Checksum Corruption Rejection
+    // Run Test 12: Binary Protocol Checksum Integrity & Bit-Flip Rejection
     setTests(prev => prev.map(t => (t.id === 'test-checksum-corruption' ? { ...t, status: 'RUNNING' } : t)));
     const t12Start = performance.now();
     const validPacket = BinaryProtocol.encodePing();
     const corruptPacket = new Uint8Array(validPacket);
-    // Corrupt the checksum byte (index payload.length + 5)
+    // Corrupt the checksum byte
     const csIndex = validPacket.length - 3; 
     corruptPacket[csIndex] = corruptPacket[csIndex] ^ 0xFF;
     const parseResCorrupt = BinaryProtocol.parseStream(corruptPacket);
-    const t12Pass = parseResCorrupt.packets.length === 0;
+    const t12Pass = parseResCorrupt.packets.length === 0 && parseResCorrupt.remainingBuffer.length > 0;
     const t12Duration = Math.round(performance.now() - t12Start);
     setTests(prev => prev.map(t => (t.id === 'test-checksum-corruption' ? { ...t, status: t12Pass ? 'PASS' : 'FAIL', executionTimeMs: t12Duration } : t)));
 

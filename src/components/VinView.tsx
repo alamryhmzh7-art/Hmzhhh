@@ -39,7 +39,7 @@ export const VinView: React.FC<VinViewProps> = ({ status, vinInfo, setVinInfo, i
       }
 
       // Send Mode 09 PID 02 (VIN request) via transportManager
-      const resp = await transportManager.sendRequest([0x09, 0x02], '0x7E0');
+      const resp = await transportManager.sendRequest([0x09, 0x02], '0x7DF');
       
       if (isMockMode) {
         const decoded = VinDecoder.decode('4T1BF1FK5NU123456');
