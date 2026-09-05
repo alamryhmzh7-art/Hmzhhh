@@ -614,34 +614,27 @@ export class TransportManager {
     }
 
     try {
-      // IMPROVED ISO-TP Framing Logic
-      let canPayload: number[];
+      let frames: number[][] = [];
       let multiFrameTx = false;
-      let remainingTxBytes: number[] = [];
 
-      // 1. Detection: If user passed 8 bytes and first byte is 0-7, it's definitely a pre-formatted SF.
-      // 2. Detection: If length is < 8, but requestBytes[0] matches the data length, it might be pre-formatted.
-      const alreadyHasPci = (requestBytes.length === 8 && requestBytes[0] <= 0x07) || 
-                            (requestBytes.length > 1 && requestBytes.length <= 8 && requestBytes[0] === requestBytes.length - 1);
+      // Detect if the payload is already ISO-TP formatted (8 bytes with valid PCI)
+      const pci = requestBytes[0];
+      const pciType = pci & 0xF0;
+      const isAlreadyIsoTp = (requestBytes.length === 8) && (
+        pciType === 0x00 || pciType === 0x10 || pciType === 0x20 || pciType === 0x30
+      );
 
-      if (alreadyHasPci) {
-        console.log(`[OBD-TX] [${correlationId}] Detected pre-formatted ISO-TP Frame. Bypassing auto-wrap.`);
-        canPayload = [...requestBytes];
-        while (canPayload.length < 8) canPayload.push(0x00);
-      } else if (requestBytes.length <= 7) {
-        // Single Frame (SF) - Standard OBD/UDS Auto-wrap
-        canPayload = [requestBytes.length, ...requestBytes];
-        while (canPayload.length < 8) canPayload.push(0x00);
+      if (isAlreadyIsoTp) {
+        console.log(`[OBD-TX] [${correlationId}] Bypassing auto-wrap (Pre-formatted ISO-TP detected)`);
+        frames = [requestBytes];
       } else {
-        // Multi-frame request initialization (ISO-TP First Frame)
-        multiFrameTx = true;
-        // ISO-TP First Frame: PCI(1B: 0x10 | high nibble of length) + Len(1B: low byte of length)
-        // Standard ISO-TP: [1][LLL] [LL] ...
-        const len = requestBytes.length;
-        canPayload = [0x10 | ((len >> 8) & 0x0F), len & 0xFF, ...requestBytes.slice(0, 6)];
-        remainingTxBytes = requestBytes.slice(6);
-        console.log(`[ISO-TP-TX] [${correlationId}] Initiating Multi-frame TX (Total Len: ${len})`);
+        // Use standard ISO-TP segmentation
+        frames = IsoTpProtocol.encodePayload(requestBytes, isExtended);
       }
+
+      const firstFrame = frames[0];
+      multiFrameTx = frames.length > 1;
+      const remainingBytes = multiFrameTx ? requestBytes.slice(6) : [];
 
       const seq = ++this.sequenceId;
       let actualResponseIdNum = numCanId + 8;
@@ -678,7 +671,7 @@ export class TransportManager {
           correlationId,
           timer,
           txState: multiFrameTx ? {
-            remainingBytes: remainingTxBytes,
+            remainingBytes: remainingBytes,
             nextSequence: 1,
             blockSize: 0,
             stMin: 0,
@@ -688,20 +681,20 @@ export class TransportManager {
       });
 
       // Send the frame
-      console.log(`[CAN-TX] [${correlationId}] ID=0x${numCanId.toString(16).toUpperCase()} DATA=[${canPayload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
+      console.log(`[CAN-TX] [${correlationId}] ID=0x${numCanId.toString(16).toUpperCase()} DATA=[${firstFrame.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
       
       // Log to CAN Monitor
       canManager.addFrame({
         id: `0x${numCanId.toString(16).toUpperCase()}`,
-        dlc: canPayload.length,
-        dataHex: canPayload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' '),
-        dataBytes: canPayload,
+        dlc: firstFrame.length,
+        dataHex: firstFrame.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' '),
+        dataBytes: firstFrame,
         direction: 'Tx',
         isExtended,
         description: multiFrameTx ? 'ISO-TP First Frame' : 'ISO-TP Single Frame'
       });
 
-      const ok = await this.activeTransport.sendCanFrame(numCanId, canPayload, isExtended);
+      const ok = await this.activeTransport.sendCanFrame(numCanId, firstFrame, isExtended);
       if (!ok) {
         this.cleanupRequest(seq);
         console.error(`[CAN-TX] [${correlationId}] FAILED to send to transport`);
@@ -713,13 +706,13 @@ export class TransportManager {
         direction: '[CAN-TX]',
         protocol: this.config.protocol,
         canIdHex: `0x${numCanId.toString(16).toUpperCase()}`,
-        dlc: canPayload.length,
-        requestRaw: canPayload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' '),
+        dlc: firstFrame.length,
+        requestRaw: firstFrame.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' '),
         durationMs: 0,
         status: 'SUCCESS'
       });
 
-      console.log(`[CAN-TX] [${correlationId}] SENT SUCCESS: ID=0x${numCanId.toString(16).toUpperCase()} DATA=[${canPayload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
+      console.log(`[CAN-TX] [${correlationId}] SENT SUCCESS: ID=0x${numCanId.toString(16).toUpperCase()} DATA=[${firstFrame.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
 
       // If we sent a First Frame, we need to handle Consecutive Frames here or via the receiver.
       // Current architecture handles Flow Control and CF reassembly in handleCanFrame.
