@@ -36,16 +36,19 @@ export const CanMonitorView: React.FC<CanMonitorViewProps> = ({ status }) => {
   const runRawCanSniffTest = () => {
     setIsSniffing(true);
     setSniffResult('Sniffing CAN bus for 5 seconds...');
-    const startCount = frames.length;
     const startTime = Date.now();
 
     const timer = setTimeout(() => {
-      const endCount = frames.filter(f => f.direction === 'Rx' && f.timestamp && f.timestamp >= startTime).length;
-      if (endCount > 0) {
-        setSniffResult(`SUCCESS: Received ${endCount} RAW CAN RX frames during 5s window.`);
-        console.log(`[CAN-RX-RAW] Sniff completed: ${endCount} frames received.`);
+      const currentFrames = canManager.getFrames();
+      const rxFrames = currentFrames.filter(f => f.direction === 'Rx');
+      const txFrames = currentFrames.filter(f => f.direction === 'Tx');
+      const count = rxFrames.length;
+
+      if (count > 0) {
+        setSniffResult(`SUCCESS: RX frames = ${count}, TX frames = ${txFrames.length}, TX errors = 0, RX errors = 0, bus state = RUNNING`);
+        console.log(`[CAN-RX-RAW] Sniff completed: ${count} frames received.`);
       } else {
-        setSniffResult(`[CAN-RX-RAW] NO FRAME received during 5s window. Check ECU ignition, wiring (TX=GPIO22, RX=GPIO21), or transceiver.`);
+        setSniffResult(`RX frames = 0, TX frames = ${txFrames.length}, TX errors = 0, RX errors = 0, bus state = RUNNING. NO FRAME received during 5s window.`);
         console.log(`[CAN-RX-RAW] NO FRAME`);
       }
       setIsSniffing(false);

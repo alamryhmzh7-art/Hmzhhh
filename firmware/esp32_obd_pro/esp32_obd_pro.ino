@@ -118,7 +118,11 @@ void initCAN(uint32_t speedKbps) {
     if (twai_start() == ESP_OK) {
       stats.canInitialized = true;
       currentCanSpeedKbps = speedKbps;
-      Serial.printf("[CAN] TWAI Initialized successfully @ %d kbps\n", speedKbps);
+
+      twai_status_info_t s_info;
+      twai_get_status_info(&s_info);
+      Serial.printf("[CAN-INIT] Bitrate=%d kbps | TX_GPIO=%d | RX_GPIO=%d | State=%d | TX_Err=%d | RX_Err=%d | Overruns=%d | MsgsToRx=%d\n",
+        speedKbps, (int)CAN_TX_PIN, (int)CAN_RX_PIN, (int)s_info.state, s_info.tx_error_counter, s_info.rx_error_counter, s_info.rx_overrun_count, s_info.msgs_to_rx);
       return;
     }
   }
@@ -218,7 +222,7 @@ void loop() {
     twai_message_t rxMsg;
     while (twai_receive(&rxMsg, 0) == ESP_OK) {
       // Mandatory Raw RX Logging BEFORE any parsing or forwarding
-      Serial.printf("[CAN-RX-RAW] ID=0x%03X DLC=%d DATA=", rxMsg.identifier, rxMsg.data_length_code);
+      Serial.printf("[CAN-RX-RAW] ID=0x%08X EXT=%d RTR=%d DLC=%d DATA=", rxMsg.identifier, rxMsg.extd ? 1 : 0, rxMsg.rtr ? 1 : 0, rxMsg.data_length_code);
       for (int i = 0; i < rxMsg.data_length_code && i < 8; i++) {
         Serial.printf("%02X ", rxMsg.data[i]);
       }
