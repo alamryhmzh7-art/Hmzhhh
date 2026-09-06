@@ -112,47 +112,85 @@ export const DiagnosticAuditView: React.FC<{ status: ConnectionStatus }> = ({ st
       // 5. ECU Communication (VEHICLE VERIFIED)
       updateStep(4, { status: 'PENDING', evidence: 'Requesting PID 0x00...' });
       const ecuResp: any = await transportManager.sendRequest([0x01, 0x00], '0x7DF');
-      if (ecuResp.status === 'SUCCESS' && ecuResp.responseRaw) {
+      
+      const rxFrame = ecuResp.auditFrames?.find((f: any) => 
+        f.direction === 'RX' && 
+        f.id >= 0x7E8 && f.id <= 0x7EF &&
+        f.data && f.data.length >= 2 && f.data[0] === 0x41 && f.data[1] === 0x00
+      );
+
+      if (ecuResp.status === 'SUCCESS' && rxFrame) {
         const txFrame = ecuResp.auditFrames?.find((f: any) => f.direction === 'TX');
-        const rxFrame = ecuResp.auditFrames?.find((f: any) => f.direction === 'RX');
-        
         const txHex = txFrame ? txFrame.data.map((b: number) => b.toString(16).padStart(2, '0').toUpperCase()).join(' ') : '03 01 00 00 00 00 00 00';
-        const rxHex = rxFrame ? rxFrame.data.map((b: number) => b.toString(16).padStart(2, '0').toUpperCase()).join(' ') : ecuResp.responseRaw;
+        const rxHex = rxFrame.data.map((b: number) => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
 
         updateStep(4, { 
           status: 'PASS', 
-          evidence: `RX 0x7E8 [8] ${ecuResp.responseRaw}`,
-          hexData: { tx: `7DF [8] ${txHex}`, rx: `${rxFrame?.id.toString(16).toUpperCase() || '7E8'} [8] ${rxHex}` }
+          evidence: `RX 0x${rxFrame.id.toString(16).toUpperCase()} [8] ${rxHex}`,
+          details: `Validated real ECU response for 01 00 from ID 0x${rxFrame.id.toString(16).toUpperCase()}`,
+          hexData: { tx: `7DF [8] ${txHex}`, rx: `0x${rxFrame.id.toString(16).toUpperCase()} [8] ${rxHex}` }
         });
       } else {
-        updateStep(4, { status: 'FAIL', evidence: `NO RESPONSE from 0x7DF (${ecuResp.status})` });
+        updateStep(4, { status: 'FAIL', evidence: `NO VALID ECU RX FRAME (${ecuResp.status})`, details: 'Required CAN ID 0x7E8-0x7EF with positive response 41 00 not found in auditFrames' });
       }
 
       // 6. ISO-TP Reassembly (VEHICLE VERIFIED)
       updateStep(5, { status: 'PENDING', evidence: 'Reassembling VIN (0x09 0x02)...' });
       const vinPkt: any = await transportManager.sendRequest([0x09, 0x02], '0x7DF');
       if (vinPkt.status === 'SUCCESS' && vinPkt.auditFrames) {
-        const ff = vinPkt.auditFrames.find((f: any) => (f.data[0] & 0xF0) === 0x10);
+        const ff = vinPkt.auditFrames.find((f: any) => f.direction === 'RX' && (f.data[0] & 0xF0) === 0x10);
         const fc = vinPkt.auditFrames.find((f: any) => (f.data[0] & 0xF0) === 0x30);
-        const cfs = vinPkt.auditFrames.filter((f: any) => (f.data[0] & 0xF0) === 0x20);
+        const cfs = vinPkt.auditFrames.filter((f: any) => f.direction === 'RX' && (f.data[0] & 0xF0) === 0x20);
 
-        if (ff) {
+        if (ff && cfs.length > 0) {
           const totalLen = ((ff.data[0] & 0x0F) << 8) | ff.data[1];
+          
+          // Verify sequence numbers and continuity
+          let expectedSeq = 1;
+          let seqValid = true;
+          cfs.forEach((cf: any) => {
+            const seq = cf.data[0] & 0x0F;
+            if (seq !== (expectedSeq & 0x0F)) {
+              seqValid = false;
+            }
+            expectedSeq++;
+          });
+
+          // Extract payload bytes from FF (6 bytes) and CFs (7 bytes each)
+          const payloadBytes: number[] = [];
+          // FF payload starts at index 2
+          payloadBytes.push(...ff.data.slice(2));
+          cfs.forEach((cf: any) => {
+            payloadBytes.push(...cf.data.slice(1));
+          });
+
+          const reassembledLen = payloadBytes.length;
+          const isServiceValid = payloadBytes[0] === 0x49 && payloadBytes[1] === 0x02;
+
+          // Extract VIN if length permits (VIN starts at index 2 of 09 02 response, typically 17 chars)
+          let extractedVin = 'N/A';
+          if (payloadBytes.length >= 2 + 17) {
+            const vinBytes = payloadBytes.slice(2, 2 + 17);
+            extractedVin = String.fromCharCode(...vinBytes);
+          }
+
+          const isPass = seqValid && isServiceValid && (reassembledLen >= totalLen || payloadBytes.length >= totalLen);
+
           const ffHex = ff.data.map((b: number) => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
-          const fcHex = fc ? fc.data.map((b: number) => b.toString(16).padStart(2, '0').toUpperCase()).join(' ') : 'WAITING...';
+          const fcHex = fc ? fc.data.map((b: number) => b.toString(16).padStart(2, '0').toUpperCase()).join(' ') : 'NOT REQUIRED/SENT';
           const cfEvidence = cfs.map((f: any) => `CF${f.data[0] & 0x0F}: ${f.data.map((b: number) => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}`).join('\n');
 
           updateStep(5, { 
-            status: 'PASS', 
-            evidence: `ISO-TP Reassembly Proof: ${totalLen} bytes`,
-            details: `FF: ${ffHex}\nFC: ${fcHex}\n${cfEvidence}`,
-            hexData: { tx: 'Functional Broadcast 09 02', rx: vinPkt.responseRaw }
+            status: isPass ? 'PASS' : 'FAIL', 
+            evidence: `VIN: ${extractedVin} | Total Len: ${totalLen} | Reassembled: ${reassembledLen} bytes`,
+            details: `FF: ${ffHex}\nFC: ${fcHex}\n${cfEvidence}\nSequence Valid: ${seqValid ? 'YES' : 'FAIL'} | Service 49 02: ${isServiceValid ? 'YES' : 'FAIL'}`,
+            hexData: { tx: 'Functional Broadcast 09 02', rx: `FF + ${cfs.length} CFs` }
           });
         } else {
-          updateStep(5, { status: 'FAIL', evidence: 'ISO-TP FF NOT DETECTED', details: 'Response was too short for multi-frame logic' });
+          updateStep(5, { status: 'FAIL', evidence: 'ISO-TP REASSEMBLY INCOMPLETE', details: 'First Frame or Consecutive Frames missing from auditFrames' });
         }
       } else {
-        updateStep(5, { status: 'FAIL', evidence: 'VIN Multi-frame timeout' });
+        updateStep(5, { status: 'FAIL', evidence: 'VIN Multi-frame timeout or no audit trail' });
       }
 
       // 7. OBD/UDS Decoder (VEHICLE VERIFIED)
