@@ -134,12 +134,12 @@ export const DiagnosticAuditView: React.FC<{ status: ConnectionStatus }> = ({ st
         updateStep(4, { status: 'FAIL', evidence: `NO VALID ECU RX FRAME (${ecuResp.status})`, details: 'Required CAN ID 0x7E8-0x7EF with positive response 41 00 not found in auditFrames' });
       }
 
-      // 6. ISO-TP Reassembly (VEHICLE VERIFIED)
+       // 6. ISO-TP Reassembly (VEHICLE VERIFIED)
       updateStep(5, { status: 'PENDING', evidence: 'Reassembling VIN (0x09 0x02)...' });
       const vinPkt: any = await transportManager.sendRequest([0x09, 0x02], '0x7DF');
       if (vinPkt.status === 'SUCCESS' && vinPkt.auditFrames) {
         const ff = vinPkt.auditFrames.find((f: any) => f.direction === 'RX' && (f.data[0] & 0xF0) === 0x10);
-        const fc = vinPkt.auditFrames.find((f: any) => (f.data[0] & 0xF0) === 0x30);
+        const fc = vinPkt.auditFrames.find((f: any) => f.direction === 'TX' && (f.data[0] & 0xF0) === 0x30);
         const cfs = vinPkt.auditFrames.filter((f: any) => f.direction === 'RX' && (f.data[0] & 0xF0) === 0x20);
 
         if (ff && cfs.length > 0) {
@@ -169,12 +169,20 @@ export const DiagnosticAuditView: React.FC<{ status: ConnectionStatus }> = ({ st
 
           // Extract VIN if length permits (VIN starts at index 2 of 09 02 response, typically 17 chars)
           let extractedVin = 'N/A';
+          let isVinValid = false;
           if (payloadBytes.length >= 2 + 17) {
             const vinBytes = payloadBytes.slice(2, 2 + 17);
-            extractedVin = String.fromCharCode(...vinBytes);
+            if (vinBytes.length === 17) {
+              // Validate printable ASCII, no control chars or invalid whitespace
+              isVinValid = vinBytes.every(b => b >= 32 && b <= 126 && b !== 32 && b !== 9 && b !== 10 && b !== 13);
+              if (isVinValid) {
+                extractedVin = String.fromCharCode(...vinBytes);
+              }
+            }
           }
 
-          const isPass = seqValid && isServiceValid && (reassembledLen >= totalLen || payloadBytes.length >= totalLen);
+          const isLengthExact = reassembledLen === totalLen;
+          const isPass = seqValid && isServiceValid && isLengthExact && isVinValid;
 
           const ffHex = ff.data.map((b: number) => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
           const fcHex = fc ? fc.data.map((b: number) => b.toString(16).padStart(2, '0').toUpperCase()).join(' ') : 'NOT REQUIRED/SENT';
@@ -183,7 +191,7 @@ export const DiagnosticAuditView: React.FC<{ status: ConnectionStatus }> = ({ st
           updateStep(5, { 
             status: isPass ? 'PASS' : 'FAIL', 
             evidence: `VIN: ${extractedVin} | Total Len: ${totalLen} | Reassembled: ${reassembledLen} bytes`,
-            details: `FF: ${ffHex}\nFC: ${fcHex}\n${cfEvidence}\nSequence Valid: ${seqValid ? 'YES' : 'FAIL'} | Service 49 02: ${isServiceValid ? 'YES' : 'FAIL'}`,
+            details: `FF: ${ffHex}\nFC (TX): ${fcHex}\n${cfEvidence}\nSequence Valid: ${seqValid ? 'YES' : 'FAIL'} | Service 49 02: ${isServiceValid ? 'YES' : 'FAIL'} | Length Match (===): ${isLengthExact ? 'YES' : 'FAIL'} | VIN Valid: ${isVinValid ? 'YES' : 'FAIL'}`,
             hexData: { tx: 'Functional Broadcast 09 02', rx: `FF + ${cfs.length} CFs` }
           });
         } else {
