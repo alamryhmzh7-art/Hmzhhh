@@ -217,7 +217,12 @@ void loop() {
   if (stats.canInitialized) {
     twai_message_t rxMsg;
     while (twai_receive(&rxMsg, 0) == ESP_OK) {
-      stats.messagesReceived++;
+      // Mandatory Raw RX Logging BEFORE any parsing or forwarding
+      Serial.printf("[CAN-RX-RAW] ID=0x%03X DLC=%d DATA=", rxMsg.identifier, rxMsg.data_length_code);
+      for (int i = 0; i < rxMsg.data_length_code && i < 8; i++) {
+        Serial.printf("%02X ", rxMsg.data[i]);
+      }
+      Serial.println();
 
       // Construct Binary CAN Frame Payload
       // Format: [CAN_ID (4B)] [FLAGS (1B)] [DLC (1B)] [DATA (0..8B)]
@@ -237,12 +242,7 @@ void loop() {
       uint16_t payloadLen = 6 + rxMsg.data_length_code;
       broadcastBinaryPacket(CMD_CAN_FRAME, payload, payloadLen);
 
-      // Log RX for debugging
-      Serial.printf("[ESP32-CAN-RX] ID=0x%X DLC=%d DATA=", rxMsg.identifier, rxMsg.data_length_code);
-      for (int i = 0; i < rxMsg.data_length_code; i++) {
-        Serial.printf("%02X ", rxMsg.data[i]);
-      }
-      Serial.println();
+      stats.messagesReceived++;
 
       // Flash status LED on active bus traffic
       digitalWrite(STATUS_LED_PIN, !digitalRead(STATUS_LED_PIN));

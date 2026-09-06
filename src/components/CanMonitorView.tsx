@@ -30,6 +30,27 @@ export const CanMonitorView: React.FC<CanMonitorViewProps> = ({ status }) => {
   const [sendCanId, setSendCanId] = useState<string>('0x7DF');
   const [sendDataHex, setSendDataHex] = useState<string>('02 01 0C 00 00 00 00 00');
   const streamEndRef = useRef<HTMLDivElement>(null);
+  const [isSniffing, setIsSniffing] = useState<boolean>(false);
+  const [sniffResult, setSniffResult] = useState<string | null>(null);
+
+  const runRawCanSniffTest = () => {
+    setIsSniffing(true);
+    setSniffResult('Sniffing CAN bus for 5 seconds...');
+    const startCount = frames.length;
+    const startTime = Date.now();
+
+    const timer = setTimeout(() => {
+      const endCount = frames.filter(f => f.direction === 'Rx' && f.timestamp && f.timestamp >= startTime).length;
+      if (endCount > 0) {
+        setSniffResult(`SUCCESS: Received ${endCount} RAW CAN RX frames during 5s window.`);
+        console.log(`[CAN-RX-RAW] Sniff completed: ${endCount} frames received.`);
+      } else {
+        setSniffResult(`[CAN-RX-RAW] NO FRAME received during 5s window. Check ECU ignition, wiring (TX=GPIO22, RX=GPIO21), or transceiver.`);
+        console.log(`[CAN-RX-RAW] NO FRAME`);
+      }
+      setIsSniffing(false);
+    }, 5000);
+  };
 
   useEffect(() => {
     const unsubscribe = canManager.subscribe((frame) => {
@@ -143,6 +164,19 @@ export const CanMonitorView: React.FC<CanMonitorViewProps> = ({ status }) => {
           </button>
 
           <button
+            onClick={runRawCanSniffTest}
+            disabled={isSniffing}
+            className={`px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all ${
+              isSniffing 
+                ? 'bg-cyan-800 text-cyan-200 cursor-wait' 
+                : 'bg-cyan-600 hover:bg-cyan-500 text-white'
+            }`}
+          >
+            <Activity className="h-3.5 w-3.5 animate-pulse" />
+            <span>{isSniffing ? 'Sniffing (5s)...' : 'Run Raw CAN Sniff Test'}</span>
+          </button>
+
+          <button
             onClick={clearFrames}
             className="px-3 py-2 rounded-lg text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 flex items-center gap-1.5 transition-colors"
           >
@@ -159,6 +193,19 @@ export const CanMonitorView: React.FC<CanMonitorViewProps> = ({ status }) => {
           </button>
         </div>
       </div>
+
+      {sniffResult && (
+        <div className={`p-3 rounded-xl border text-xs font-mono flex items-center justify-between ${
+          sniffResult.includes('SUCCESS') 
+            ? 'bg-emerald-950/40 border-emerald-800 text-emerald-300' 
+            : sniffResult.includes('NO FRAME')
+            ? 'bg-rose-950/40 border-rose-800 text-rose-300'
+            : 'bg-cyan-950/40 border-cyan-800 text-cyan-300'
+        }`}>
+          <span>{sniffResult}</span>
+          <button onClick={() => setSniffResult(null)} className="text-slate-400 hover:text-white font-bold ml-2">×</button>
+        </div>
+      )}
 
       {/* Manual CAN Frame Injector */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
