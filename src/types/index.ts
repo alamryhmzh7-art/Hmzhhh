@@ -205,6 +205,8 @@ export interface CommunicationPacket {
   requestRaw?: string;
   responseRaw?: string;
   decodedData?: string;
+  data?: number[];
+  auditFrames?: any[];
   error?: string;
   durationMs: number;
   status: 'SUCCESS' | 'TIMEOUT' | 'ERROR' | 'NRC';

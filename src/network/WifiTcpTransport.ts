@@ -318,18 +318,20 @@ export class WifiTcpTransport implements ITransport {
     }
 
     return new Promise((resolve) => {
+      const pingPacket = BinaryProtocol.encodePing();
+      const txHex = Array.from(pingPacket).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+
       const pingTimeout = setTimeout(() => {
         this.pingResolver = null;
-        resolve({ success: false, latencyMs: Math.round(performance.now() - startTime), info: 'Ping Timeout' });
+        resolve({ success: false, latencyMs: Math.round(performance.now() - startTime), info: 'Ping Timeout', txHex });
       }, 2000);
 
       this.pingResolver = (res) => {
         clearTimeout(pingTimeout);
         this.pingResolver = null;
-        resolve(res);
+        resolve({ ...res, txHex });
       };
 
-      const pingPacket = BinaryProtocol.encodePing();
       this.sendRaw(pingPacket);
     });
   }
@@ -405,12 +407,14 @@ export class WifiTcpTransport implements ITransport {
       this.canFrameListeners.forEach(l => l(pkt.canFrame!));
     } else if (pkt.cmd === BinaryCommand.CMD_PONG && pkt.pongInfo) {
       if (this.pingResolver) {
+        const rxHex = Array.from(pkt.rawFrame).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
         this.pingResolver({
           success: true,
           latencyMs: 15,
           canReady: pkt.pongInfo.canReady,
           uptimeMs: pkt.pongInfo.uptimeMs,
           freeHeapBytes: pkt.pongInfo.freeHeapBytes,
+          rxHex: rxHex,
           info: `ESP32 Wi-Fi Up: ${(pkt.pongInfo.uptimeMs / 1000).toFixed(1)}s | Heap: ${(pkt.pongInfo.freeHeapBytes / 1024).toFixed(0)}KB`
         });
       }

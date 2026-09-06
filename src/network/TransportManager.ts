@@ -18,7 +18,7 @@ import { PacketParser } from './TcpClient';
 import { IsoTpProtocol, IsoTpFrameType, FlowStatus } from '../isotp/isoTpProtocol';
 
 interface PendingDiagnosticRequest {
-  resolve: (data: number[]) => void;
+  resolve: (data: { payload: number[], auditFrames: any[] }) => void;
   reject: (err: Error) => void;
   canId: number;
   requestBytes: number[];
@@ -28,6 +28,13 @@ interface PendingDiagnosticRequest {
   isoTpTimer?: any;
   correlationId: string;
   isExtended: boolean;
+  auditFrames: {
+    direction: 'TX' | 'RX';
+    id: number;
+    data: number[];
+    timestamp: number;
+    type?: string;
+  }[];
   // RX State
   isoTpBuffer?: {
     totalLength: number;
@@ -42,6 +49,19 @@ interface PendingDiagnosticRequest {
     stMin: number;
     framesInBlock: number;
   };
+}
+
+export interface DiagnosticResult {
+  status: 'SUCCESS' | 'TIMEOUT' | 'ERROR' | 'NRC';
+  responseRaw?: string;
+  data?: number[];
+  auditFrames?: {
+    direction: 'TX' | 'RX';
+    id: number;
+    data: number[];
+    timestamp: number;
+    type?: string;
+  }[];
 }
 
 export class TransportManager {
@@ -113,12 +133,24 @@ export class TransportManager {
         const data = frame.dataBytes;
         if (!data || data.length < 2) continue;
 
+        const pciType = data[0] & 0xF0;
+        
+        // RECORD RX FRAME IN AUDIT
+        req.auditFrames.push({
+          direction: 'RX',
+          id: frameIdNum,
+          data: [...data],
+          timestamp: Date.now(),
+          type: pciType === IsoTpFrameType.SINGLE_FRAME ? 'ISO-TP SF' :
+                pciType === IsoTpFrameType.FIRST_FRAME ? 'ISO-TP FF' :
+                pciType === IsoTpFrameType.CONSECUTIVE_FRAME ? 'ISO-TP CF' :
+                pciType === IsoTpFrameType.FLOW_CONTROL ? 'ISO-TP FC' : 'CAN_FRAME'
+        });
+
         // Lock actual response ID once found
         if (req.actualResponseId === undefined) {
           req.actualResponseId = frameIdNum;
         }
-
-        const pciType = data[0] & 0xF0;
 
         // 1. Handle Flow Control (0x30)
         if (pciType === IsoTpFrameType.FLOW_CONTROL) {
@@ -349,8 +381,9 @@ export class TransportManager {
         // Complete Reassembly
         const fullPayload = req.isoTpBuffer.receivedBytes.slice(0, req.isoTpBuffer.totalLength);
         console.log(`[ISO-TP-RX] REASSEMBLY SUCCESS: ID=0x${frameIdNum.toString(16).toUpperCase()} LEN=${req.isoTpBuffer.totalLength}`);
+        const auditFrames = [...req.auditFrames];
         this.cleanupRequest(seq);
-        req.resolve(fullPayload);
+        req.resolve({ payload: fullPayload, auditFrames });
       } else {
         // N_Cr Timeout (Inter-frame) - ISO 15765-2 standard is 1000ms, using 1500ms for network jitter
         req.isoTpTimer = setTimeout(() => {
@@ -374,8 +407,9 @@ export class TransportManager {
     }
     const payload = data.slice(1, 1 + sfLength);
     console.log(`[ISO-TP-RX] Single Frame: Len=${sfLength} Payload=[${payload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}]`);
+    const auditFrames = [...req.auditFrames];
     this.cleanupRequest(seq);
-    req.resolve(payload);
+    req.resolve({ payload, auditFrames });
   }
 
   private handleFirstFrame(req: PendingDiagnosticRequest, frameIdNum: number, data: number[], seq: number) {
@@ -419,6 +453,15 @@ export class TransportManager {
     const fcFrame = [0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
     console.log(`[ISO-TP-TX] SENDING FLOW CONTROL: TARGET=0x${fcTargetId.toString(16).toUpperCase()} STATUS=CONTINUE`);
     
+    // Record FC TX in audit
+    req.auditFrames.push({
+      direction: 'TX',
+      id: fcTargetId,
+      data: [...fcFrame],
+      timestamp: Date.now(),
+      type: 'ISO-TP FC'
+    });
+
     // Log to CAN Monitor
     canManager.addFrame({
       id: `0x${fcTargetId.toString(16).toUpperCase()}`,
@@ -489,6 +532,15 @@ export class TransportManager {
       
       const cfFrame = [(0x20 | (req.txState.nextSequence & 0x0F)), ...payload];
       while (cfFrame.length < 8) cfFrame.push(0x00);
+
+      // Record CF TX in audit
+      req.auditFrames.push({
+        direction: 'TX',
+        id: req.canId,
+        data: [...cfFrame],
+        timestamp: Date.now(),
+        type: `ISO-TP CF ${req.txState.nextSequence & 0x0F}`
+      });
 
       // Log to CAN Monitor
       canManager.addFrame({
@@ -639,7 +691,7 @@ export class TransportManager {
       const seq = ++this.sequenceId;
       let actualResponseIdNum = numCanId + 8;
 
-      const responsePromise = new Promise<number[]>((resolve, reject) => {
+      const responsePromise = new Promise<{ payload: number[], auditFrames: any[] }>((resolve, reject) => {
         const timeoutMs = requestBytes.length > 7 ? 7000 : 3500; 
         const timer = setTimeout(() => {
           this.cleanupRequest(seq);
@@ -670,6 +722,7 @@ export class TransportManager {
           isExtended,
           correlationId,
           timer,
+          auditFrames: [],
           txState: multiFrameTx ? {
             remainingBytes: remainingBytes,
             nextSequence: 1,
@@ -678,6 +731,15 @@ export class TransportManager {
             framesInBlock: 0
           } : undefined
         };
+      });
+
+      // Record first frame in audit
+      this.pendingRequests[seq].auditFrames.push({
+        direction: 'TX',
+        id: numCanId,
+        data: [...firstFrame],
+        timestamp: Date.now(),
+        type: multiFrameTx ? 'ISO-TP FF' : 'ISO-TP SF'
       });
 
       // Send the frame
@@ -717,14 +779,16 @@ export class TransportManager {
       // If we sent a First Frame, we need to handle Consecutive Frames here or via the receiver.
       // Current architecture handles Flow Control and CF reassembly in handleCanFrame.
       
-      const responseBytes = await responsePromise;
+      const resultData = await responsePromise;
+      const responseBytes = resultData.payload;
+      const auditFrames = resultData.auditFrames;
       const durationMs = Math.round(performance.now() - startTime);
       const resHex = responseBytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
       const actualResponseIdHex = '0x' + actualResponseIdNum.toString(16).toUpperCase();
 
       console.log(`[OBD-RX] [${correlationId}] CAN=${actualResponseIdHex} PAYLOAD=[${resHex}] (${durationMs}ms)`);
 
-      return commLogger.logPacket({
+      const finalPacket = commLogger.logPacket({
         direction: '[OBD-RX]',
         protocol: this.config.protocol,
         canIdHex: actualResponseIdHex,
@@ -733,6 +797,8 @@ export class TransportManager {
         durationMs,
         status: responseBytes[0] === 0x7F ? 'NRC' : 'SUCCESS'
       });
+
+      return { ...finalPacket, data: responseBytes, auditFrames };
 
     } catch (err: any) {
       const durationMs = Math.round(performance.now() - startTime);
