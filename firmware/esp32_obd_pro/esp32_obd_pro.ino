@@ -530,7 +530,12 @@ void runObdTest() {
   }
 
   stats.messagesSent++;
-  Serial.println("[OBD-WAIT] Waiting for response from ECU (0x7E8 - 0x7EF)...");
+  twai_status_info_t tx_s_info;
+  twai_get_status_info(&tx_s_info);
+  Serial.printf("[OBD-TX-STATUS] Transmit queued OK | State=%d | TX_Err=%d | RX_Err=%d | MsgsToTx=%d\n",
+    tx_s_info.state, tx_s_info.tx_error_counter, tx_s_info.rx_error_counter, tx_s_info.msgs_to_tx);
+
+  Serial.println("[OBD-WAIT] Waiting for response from ECU (0x7E8 - 0x7EF) with data matching 41 0C...");
 
   unsigned long startWait = millis();
   bool received = false;
@@ -539,17 +544,25 @@ void runObdTest() {
     twai_message_t rxMsg;
     if (twai_receive(&rxMsg, pdMS_TO_TICKS(50)) == ESP_OK) {
       stats.messagesReceived++;
-      bool isObdResp = (rxMsg.identifier >= 0x7E8 && rxMsg.identifier <= 0x7EF);
+      bool isIdMatch = (rxMsg.identifier >= 0x7E8 && rxMsg.identifier <= 0x7EF);
       
+      // Check if data contains 41 0C for PID 0x0C response
+      bool isDataMatch = false;
+      if (rxMsg.data_length_code >= 3 && rxMsg.data[1] == 0x41 && rxMsg.data[2] == 0x0C) {
+        isDataMatch = true;
+      } else if (rxMsg.data_length_code >= 2 && rxMsg.data[0] == 0x41 && rxMsg.data[1] == 0x0C) {
+        isDataMatch = true;
+      }
+
       Serial.printf("[OBD-RX] ID=0x%03X EXT=%d RTR=%d DLC=%d DATA=", rxMsg.identifier, rxMsg.extd ? 1 : 0, rxMsg.rtr ? 1 : 0, rxMsg.data_length_code);
       for (int i = 0; i < rxMsg.data_length_code && i < 8; i++) {
         Serial.printf("%02X ", rxMsg.data[i]);
       }
       Serial.println();
 
-      if (isObdResp || true) {
+      if (isIdMatch && isDataMatch) {
         received = true;
-        Serial.printf("[OBD-RESULT] SUCCESS: Received response from ID=0x%03X within %ldms\n", rxMsg.identifier, millis() - startWait);
+        Serial.printf("[OBD-RESULT] SUCCESS: Received valid OBD response (41 0C) from ID=0x%03X within %ldms\n", rxMsg.identifier, millis() - startWait);
         
         // Broadcast packet over binary protocol
         uint8_t payload[14];
@@ -564,6 +577,8 @@ void runObdTest() {
         }
         broadcastBinaryPacket(CMD_CAN_FRAME, payload, 6 + rxMsg.data_length_code);
         break;
+      } else {
+        Serial.println("[OBD-WAIT] Frame received does not match OBD 0x7E8-0x7EF and 41 0C pattern. Continuing wait...");
       }
     }
     yield();
