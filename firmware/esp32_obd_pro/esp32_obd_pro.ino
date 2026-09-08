@@ -36,6 +36,7 @@
 #define STATUS_LED_PIN            2 // Built-in LED on most ESP32 boards
 
 uint32_t currentCanSpeedKbps = CAN_DEFAULT_SPEED_KBPS;
+bool enableRawCanLogging = false;
 
 // Binary Protocol Constants
 #define PROTOCOL_MAGIC_1          0xAA
@@ -90,6 +91,8 @@ void broadcastBinaryPacket(uint8_t cmd, const uint8_t* payload, uint16_t len);
 void sendPong(bool toBluetooth);
 void sendCanStatus(bool toBluetooth);
 uint8_t calculateChecksum(uint8_t cmd, uint16_t len, const uint8_t* payload);
+void runObdTest();
+void printTwaiStatus();
 
 // ----------------------------------------------------------------------------
 // CAN (TWAI) Initialization & Driver Management
@@ -217,16 +220,30 @@ void loop() {
     }
   }
 
+  // Check for Serial Monitor commands ('r' to toggle raw logging, 'o' to run OBD test, 's' to print status)
+  if (Serial.available()) {
+    char c = Serial.read();
+    if (c == 'r' || c == 'R') {
+      enableRawCanLogging = !enableRawCanLogging;
+      Serial.printf("[SYS] Raw CAN Logging is now %s (Press 'r' to toggle)\n", enableRawCanLogging ? "ENABLED" : "DISABLED");
+    } else if (c == 'o' || c == 'O') {
+      runObdTest();
+    } else if (c == 's' || c == 'S') {
+      printTwaiStatus();
+    }
+  }
+
   // D. Poll Incoming CAN Frames from Vehicle ECU (TWAI RX)
   if (stats.canInitialized) {
     twai_message_t rxMsg;
     while (twai_receive(&rxMsg, 0) == ESP_OK) {
-      // Mandatory Raw RX Logging BEFORE any parsing or forwarding
-      Serial.printf("[CAN-RX-RAW] ID=0x%08X EXT=%d RTR=%d DLC=%d DATA=", rxMsg.identifier, rxMsg.extd ? 1 : 0, rxMsg.rtr ? 1 : 0, rxMsg.data_length_code);
-      for (int i = 0; i < rxMsg.data_length_code && i < 8; i++) {
-        Serial.printf("%02X ", rxMsg.data[i]);
+      if (enableRawCanLogging) {
+        Serial.printf("[CAN-RX-RAW] ID=0x%08X EXT=%d RTR=%d DLC=%d DATA=", rxMsg.identifier, rxMsg.extd ? 1 : 0, rxMsg.rtr ? 1 : 0, rxMsg.data_length_code);
+        for (int i = 0; i < rxMsg.data_length_code && i < 8; i++) {
+          Serial.printf("%02X ", rxMsg.data[i]);
+        }
+        Serial.println();
       }
-      Serial.println();
 
       // Construct Binary CAN Frame Payload
       // Format: [CAN_ID (4B)] [FLAGS (1B)] [DLC (1B)] [DATA (0..8B)]
@@ -326,25 +343,26 @@ void handleParsedCommand(uint8_t cmd, uint16_t len, const uint8_t* payload, bool
         }
 
         // Transmit frame to CAN Transceiver
-        esp_err_t err = twai_transmit(&txMsg, pdMS_TO_TICKS(20));
+        esp_err_t err = twai_transmit(&txMsg, pdMS_TO_TICKS(50));
         if (err == ESP_OK) {
           stats.messagesSent++;
-          // Log TX for debugging
-          Serial.printf("[ESP32-CAN-TX] ID=0x%X DLC=%d DATA=", txMsg.identifier, txMsg.data_length_code);
+          Serial.printf("[OBD-TX] ID=0x%X DLC=%d DATA=", txMsg.identifier, txMsg.data_length_code);
           for (int i = 0; i < txMsg.data_length_code; i++) {
             Serial.printf("%02X ", txMsg.data[i]);
           }
           Serial.println();
         } else {
           stats.txErrorCount++;
-          // Auto-recovery for bus off or stopped state
           twai_status_info_t s_info;
-          if (twai_get_status_info(&s_info) == ESP_OK) {
-            if (s_info.state == TWAI_STATE_BUS_OFF) {
-              twai_initiate_recovery();
-            } else if (s_info.state == TWAI_STATE_STOPPED) {
-              twai_start();
-            }
+          twai_get_status_info(&s_info);
+          Serial.printf("[TWAI-ERR] twai_transmit failed! err=0x%x | State=%d | TX_Err=%d | RX_Err=%d | BusOff=%d\n", 
+            err, s_info.state, s_info.tx_error_counter, s_info.rx_error_counter, (s_info.state == TWAI_STATE_BUS_OFF));
+          if (s_info.state == TWAI_STATE_BUS_OFF) {
+            Serial.println("[TWAI-RECOVERY] Bus-off detected. Initiating recovery...");
+            twai_initiate_recovery();
+          } else if (s_info.state == TWAI_STATE_STOPPED) {
+            Serial.println("[TWAI-RECOVERY] TWAI stopped. Restarting...");
+            twai_start();
           }
         }
       }
@@ -468,4 +486,112 @@ void sendCanStatus(bool toBluetooth) {
   statusPayload[17] = stats.messagesReceived & 0xFF;
 
   broadcastBinaryPacket(CMD_CAN_STATUS_RESP, statusPayload, 21);
+}
+
+// ----------------------------------------------------------------------------
+// Independent OBD-II Connection & Response Test Function
+// ----------------------------------------------------------------------------
+void runObdTest() {
+  Serial.println("\n--------------------------------------------------");
+  Serial.println("[OBD-TEST] Starting manual OBD-II standard RPM request (0x7DF)...");
+  
+  twai_message_t txMsg;
+  txMsg.identifier = 0x7DF;
+  txMsg.extd = 0; // 11-bit standard ID
+  txMsg.rtr = 0;
+  txMsg.data_length_code = 8;
+  txMsg.data[0] = 0x02;
+  txMsg.data[1] = 0x01;
+  txMsg.data[2] = 0x0C;
+  txMsg.data[3] = 0x00;
+  txMsg.data[4] = 0x00;
+  txMsg.data[5] = 0x00;
+  txMsg.data[6] = 0x00;
+  txMsg.data[7] = 0x00;
+
+  Serial.printf("[OBD-TX] ID=0x%X DLC=%d DATA=", txMsg.identifier, txMsg.data_length_code);
+  for (int i = 0; i < 8; i++) {
+    Serial.printf("%02X ", txMsg.data[i]);
+  }
+  Serial.println();
+
+  esp_err_t err = twai_transmit(&txMsg, pdMS_TO_TICKS(50));
+  if (err != ESP_OK) {
+    stats.txErrorCount++;
+    twai_status_info_t s_info;
+    twai_get_status_info(&s_info);
+    Serial.printf("[OBD-RESULT] FAIL: twai_transmit error 0x%X | State=%d TX_Err=%d RX_Err=%d\n", 
+      err, s_info.state, s_info.tx_error_counter, s_info.rx_error_counter);
+    if (s_info.state == TWAI_STATE_BUS_OFF) {
+      twai_initiate_recovery();
+    }
+    Serial.println("--------------------------------------------------\n");
+    return;
+  }
+
+  stats.messagesSent++;
+  Serial.println("[OBD-WAIT] Waiting for response from ECU (0x7E8 - 0x7EF)...");
+
+  unsigned long startWait = millis();
+  bool received = false;
+
+  while (millis() - startWait < 1000) {
+    twai_message_t rxMsg;
+    if (twai_receive(&rxMsg, pdMS_TO_TICKS(50)) == ESP_OK) {
+      stats.messagesReceived++;
+      bool isObdResp = (rxMsg.identifier >= 0x7E8 && rxMsg.identifier <= 0x7EF);
+      
+      Serial.printf("[OBD-RX] ID=0x%03X EXT=%d RTR=%d DLC=%d DATA=", rxMsg.identifier, rxMsg.extd ? 1 : 0, rxMsg.rtr ? 1 : 0, rxMsg.data_length_code);
+      for (int i = 0; i < rxMsg.data_length_code && i < 8; i++) {
+        Serial.printf("%02X ", rxMsg.data[i]);
+      }
+      Serial.println();
+
+      if (isObdResp || true) {
+        received = true;
+        Serial.printf("[OBD-RESULT] SUCCESS: Received response from ID=0x%03X within %ldms\n", rxMsg.identifier, millis() - startWait);
+        
+        // Broadcast packet over binary protocol
+        uint8_t payload[14];
+        payload[0] = (rxMsg.identifier >> 24) & 0xFF;
+        payload[1] = (rxMsg.identifier >> 16) & 0xFF;
+        payload[2] = (rxMsg.identifier >> 8) & 0xFF;
+        payload[3] = rxMsg.identifier & 0xFF;
+        payload[4] = (rxMsg.extd ? 0x01 : 0x00) | (rxMsg.rtr ? 0x02 : 0x00);
+        payload[5] = rxMsg.data_length_code;
+        for (int i = 0; i < rxMsg.data_length_code && i < 8; i++) {
+          payload[6 + i] = rxMsg.data[i];
+        }
+        broadcastBinaryPacket(CMD_CAN_FRAME, payload, 6 + rxMsg.data_length_code);
+        break;
+      }
+    }
+    yield();
+  }
+
+  if (!received) {
+    twai_status_info_t s_info;
+    twai_get_status_info(&s_info);
+    Serial.printf("[OBD-RESULT] TIMEOUT: No response received from 0x7E8-0x7EF within 1000ms | State=%d TX_Err=%d RX_Err=%d BusOverruns=%d\n",
+      s_info.state, s_info.tx_error_counter, s_info.rx_error_counter, s_info.rx_overrun_count);
+  }
+  Serial.println("--------------------------------------------------\n");
+}
+
+void printTwaiStatus() {
+  twai_status_info_t s_info;
+  twai_get_status_info(&s_info);
+  Serial.println("--------------------------------------------------");
+  Serial.printf("[TWAI-STATUS] Speed=%d kbps | TX_PIN=%d | RX_PIN=%d | Mode=NORMAL\n", (int)currentCanSpeedKbps, (int)CAN_TX_PIN, (int)CAN_RX_PIN);
+  Serial.printf("  State: %d (%s)\n", s_info.state, 
+    s_info.state == TWAI_STATE_RUNNING ? "RUNNING" :
+    s_info.state == TWAI_STATE_STOPPED ? "STOPPED" :
+    s_info.state == TWAI_STATE_BUS_OFF ? "BUS_OFF" : "RECOVERING");
+  Serial.printf("  TX Error Counter: %u\n", s_info.tx_error_counter);
+  Serial.printf("  RX Error Counter: %u\n", s_info.rx_error_counter);
+  Serial.printf("  RX Overrun Count: %u\n", s_info.rx_overrun_count);
+  Serial.printf("  Messages to TX: %u\n", s_info.msgs_to_tx);
+  Serial.printf("  Messages to RX: %u\n", s_info.msgs_to_rx);
+  Serial.printf("  Raw Logging: %s (Press 'r' to toggle, 'o' for OBD test, 's' for status)\n", enableRawCanLogging ? "ENABLED" : "DISABLED");
+  Serial.println("--------------------------------------------------");
 }
