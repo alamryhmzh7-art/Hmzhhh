@@ -108,12 +108,32 @@ export class BluetoothSppTransport implements ITransport {
     console.log(`[RUNTIME] ${runtime}`);
 
     if (!isNative) {
-      const errMsg = 'CLASSIC_SPP_REQUIRES_ANDROID_NATIVE';
-      console.error(errMsg);
-      console.log(`[BT-CONNECT] FAILED error=${errMsg}`);
-      this.setStatus('ERROR', errMsg);
-      this.isConnecting = false;
-      return false;
+      console.log('[RUNTIME] WEB_BROWSER - Attempting Web Serial fallback');
+      try {
+        if (!('serial' in navigator)) {
+          throw new Error('Web Serial API is not supported. Use Chrome or Edge browser.');
+        }
+        
+        // This requests the port from the user
+        const port = await (navigator as any).serial.requestPort();
+        await port.open({ baudRate: 115200 }); // Common ESP32 baudrate or OBD2
+        
+        this.serialPort = port;
+        this.writer = port.writable.getWriter();
+
+        this.startSerialReadLoop();
+
+        this.rawState = 'CONNECTED';
+        this.setStatus('CONNECTED');
+        this.isConnecting = false;
+        return true;
+      } catch (err: any) {
+        const errMsg = err.message || 'Web Serial Connection Failed';
+        console.error(errMsg);
+        this.setStatus('ERROR', errMsg);
+        this.isConnecting = false;
+        return false;
+      }
     }
 
     const targetMac = (this.config.bluetoothMacAddress || '').trim().toUpperCase();
@@ -271,6 +291,20 @@ export class BluetoothSppTransport implements ITransport {
       } catch (e) {}
     }
 
+    if (this.writer) {
+      try {
+        this.writer.releaseLock();
+      } catch (e) {}
+      this.writer = null;
+    }
+
+    if (this.serialPort) {
+      try {
+        await this.serialPort.close();
+      } catch (e) {}
+      this.serialPort = null;
+    }
+
     const isNative = Capacitor.isNativePlatform();
     if (isNative) {
        try {
@@ -307,6 +341,15 @@ export class BluetoothSppTransport implements ITransport {
         return true;
       } catch (err: any) {
         console.error('[BT-TX] Write Error', err);
+        return false;
+      }
+    } else if (this.writer) {
+      console.log(`[SERIAL-TX] ${hex}`);
+      try {
+        await this.writer.write(byteArr);
+        return true;
+      } catch (err: any) {
+        console.error('[SERIAL-TX] Write Error', err);
         return false;
       }
     }
