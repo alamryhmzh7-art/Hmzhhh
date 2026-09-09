@@ -49,6 +49,11 @@ export const ServiceFunctionsView: React.FC<ServiceFunctionsViewProps> = ({ stat
     setExecutionLog(steps.map((s, idx) => ({ step: s, status: idx === 0 ? 'RUNNING' : 'PENDING' })));
 
     try {
+      // Step 0: Ensure Extended Diagnostic Session (0x10 0x03) is opened
+      console.log(`[SERVICE-FUNC] Initializing Extended Diagnostic Session (10 03)...`);
+      await transportManager.sendRequest([0x10, 0x03], '0x7E0');
+      await new Promise(r => setTimeout(r, 300));
+
       for (let i = 0; i < steps.length; i++) {
         setCurrentStepIndex(i);
         setExecutionLog(prev => prev.map((item, idx) => {
@@ -59,20 +64,40 @@ export const ServiceFunctionsView: React.FC<ServiceFunctionsViewProps> = ({ stat
 
         console.log(`[SERVICE-FUNC] Executing Step ${i + 1}: ${steps[i]}`);
         
-        // Execute UDS RoutineControl Start (0x31 0x01) for this specific routine part
-        // Target can be 0x7E0 or specified by selectedFunc
-        const resp = await transportManager.sendRequest([0x31, 0x01, ...selectedFunc.routineIdHex.replace('0x', '').match(/.{1,2}/g)!.map(h => parseInt(h, 16)), i + 1], selectedFunc.ecuTarget === 'ECM' ? '0x7E0' : '0x7E0');
-        
-        if (resp.status !== 'SUCCESS') {
-          throw new Error(resp.error || 'ECU_TIMEOUT');
+        const routineBytes = selectedFunc.routineIdHex.replace('0x', '').match(/.{1,2}/g)!.map(h => parseInt(h, 16));
+        const reqPayload = [0x31, 0x01, routineBytes[0], routineBytes[1], i + 1];
+
+        let attempts = 0;
+        let success = false;
+
+        while (attempts < 3 && !success) {
+          attempts++;
+          const resp = await transportManager.sendRequest(reqPayload, '0x7E0');
+          
+          if (resp.status === 'SUCCESS') {
+            const respBytes = resp.responseRaw ? resp.responseRaw.split(' ').map(h => parseInt(h, 16)) : [];
+            if (respBytes[0] === 0x7F && respBytes[2] === 0x78) {
+              console.log(`[SERVICE-FUNC] ECU returned NRC 0x78 (Response Pending). Waiting 2s...`);
+              await new Promise(r => setTimeout(r, 2000));
+              continue;
+            } else if (respBytes[0] === 0x7F) {
+              throw new Error(`NRC_0x${respBytes[2]?.toString(16).toUpperCase() || '??'}`);
+            }
+            success = true;
+          } else {
+            const respBytes = resp.responseRaw ? resp.responseRaw.split(' ').map(h => parseInt(h, 16)) : [];
+            if (respBytes[0] === 0x7F && respBytes[2] === 0x78) {
+              await new Promise(r => setTimeout(r, 2000));
+              continue;
+            }
+            throw new Error(resp.error || 'ECU_TIMEOUT');
+          }
         }
 
-        const respBytes = resp.responseRaw ? resp.responseRaw.split(' ').map(h => parseInt(h, 16)) : [];
-        if (respBytes[0] === 0x7F) {
-           throw new Error(`NRC_0x${respBytes[2]?.toString(16).toUpperCase() || '??'}`);
+        if (!success) {
+          throw new Error('ECU Timeout / Max Response Pending attempts reached');
         }
 
-        // Wait for routine completion if required (usually 1.5s - 3s)
         await new Promise(r => setTimeout(r, 1500));
       }
 

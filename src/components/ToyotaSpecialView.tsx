@@ -47,15 +47,39 @@ export const ToyotaSpecialView: React.FC<ToyotaSpecialViewProps> = ({ status, ba
         const bytes = cmd.requestHex.split(' ').map(h => parseInt(h, 16));
 
         console.log(`[TOYOTA-PROC] Executing Step ${i + 1}: ${cmd.description}`);
-        const resp = await transportManager.sendRequest(bytes, selectedProc.targetEcuAddrHex);
         
-        if (resp.status !== 'SUCCESS') {
-          throw new Error(resp.error || 'ECU_TIMEOUT');
+        let attempts = 0;
+        let success = false;
+        let resp: any = null;
+
+        while (attempts < 3 && !success) {
+          attempts++;
+          resp = await transportManager.sendRequest(bytes, selectedProc.targetEcuAddrHex);
+          
+          if (resp.status === 'SUCCESS') {
+            const respBytes = resp.responseRaw ? resp.responseRaw.split(' ').map(h => parseInt(h, 16)) : [];
+            if (respBytes[0] === 0x7F && respBytes[2] === 0x78) {
+              console.log(`[TOYOTA-PROC] ECU returned NRC 0x78 (Response Pending). Waiting 2s...`);
+              await new Promise(r => setTimeout(r, 2000));
+              continue;
+            } else if (respBytes[0] === 0x7F) {
+              throw new Error(`NRC_0x${respBytes[2]?.toString(16).toUpperCase() || '??'}`);
+            }
+            success = true;
+          } else {
+            // Check if responseRaw contains NRC 0x78
+            const respBytes = resp.responseRaw ? resp.responseRaw.split(' ').map(h => parseInt(h, 16)) : [];
+            if (respBytes[0] === 0x7F && respBytes[2] === 0x78) {
+              console.log(`[TOYOTA-PROC] ECU returned NRC 0x78 (Response Pending) on timeout. Waiting 2s...`);
+              await new Promise(r => setTimeout(r, 2000));
+              continue;
+            }
+            throw new Error(resp.error || 'ECU_TIMEOUT');
+          }
         }
 
-        const respBytes = resp.responseRaw ? resp.responseRaw.split(' ').map(h => parseInt(h, 16)) : [];
-        if (respBytes[0] === 0x7F) {
-           throw new Error(`NRC_0x${respBytes[2]?.toString(16).toUpperCase() || '??'}`);
+        if (!success) {
+          throw new Error('ECU Timeout / Max Response Pending attempts reached');
         }
 
         // Delay between steps as required by Toyota OEM spec
@@ -66,7 +90,6 @@ export const ToyotaSpecialView: React.FC<ToyotaSpecialViewProps> = ({ status, ba
       setIsCompleted(true);
     } catch (err: any) {
       console.error(`[TOYOTA-PROC] Failed at step ${currentStepIdx + 1}:`, err);
-      // We could add an error state here if needed
       alert(`Procedure Failed: ${err.message}`);
     } finally {
       setIsExecuting(false);

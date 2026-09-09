@@ -2,7 +2,7 @@ import { LogEntry, LogSeverity, LogCategory, CommunicationPacket, ConnectionStat
 
 class ErrorLogRepository {
   private logs: LogEntry[] = [];
-  private maxLogs: number = 1000;
+  private maxLogs: number = 300;
   private listeners: ((log: LogEntry) => void)[] = [];
 
   constructor() {
@@ -89,7 +89,7 @@ export const errorLogRepo = new ErrorLogRepository();
 
 class CommunicationLogger {
   private packets: CommunicationPacket[] = [];
-  private maxPackets: number = 2000;
+  private maxPackets: number = 300;
   private sequenceCounter: number = 1000;
   private listeners: ((packet: CommunicationPacket) => void)[] = [];
 
