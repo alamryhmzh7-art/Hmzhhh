@@ -1,6 +1,8 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useI18n } from '../i18n/I18nContext';
 import { ConnectionStatus, ConnectionConfig, VinInfo, DiagnosticTroubleCode, EcuInfo, ViewTab } from '../types';
+import { transportManager } from '../network/TransportManager';
+import { DiagnosticHeatmap } from './DiagnosticHeatmap';
 import { 
   Activity, 
   Wifi, 
@@ -21,7 +23,10 @@ import {
   Radio,
   CheckCircle2,
   XCircle,
-  HelpCircle
+  HelpCircle,
+  Plus,
+  Trash2,
+  X
 } from 'lucide-react';
 
 interface DashboardProps {
@@ -73,6 +78,35 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onQuickScan = () => {}
 }) => {
   const { t, isRtl } = useI18n();
+  const [isFabOpen, setIsFabOpen] = useState(false);
+
+  const handleClearAllDTCs = async () => {
+    setIsFabOpen(false);
+    try {
+      if (status !== 'CONNECTED' && !config.isMockMode) {
+        alert(t('msgNotConnected'));
+        return;
+      }
+      const resp = await transportManager.sendRequest([0x04], '0x7DF');
+      if (resp.status === 'SUCCESS') {
+        alert(t('msgClearSuccess'));
+      } else {
+        alert(t('msgClearFail'));
+      }
+    } catch (e: any) {
+      alert(e.message || t('msgClearFail'));
+    }
+  };
+
+  const handleRequestVIN = () => {
+    setIsFabOpen(false);
+    onNavigate('vin');
+  };
+
+  const handleQuickScanAction = () => {
+    setIsFabOpen(false);
+    onQuickScan();
+  };
 
   const getStatusBadge = (s: ConnectionStatus = 'DISCONNECTED') => {
     switch (s) {
@@ -496,6 +530,56 @@ export const Dashboard: React.FC<DashboardProps> = ({
             </div>
           </button>
         </div>
+      </div>
+
+      <div className="mt-6">
+        <DiagnosticHeatmap />
+      </div>
+
+      {/* Floating Action Button (FAB) Menu */}
+      <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-3">
+        {/* Menu Items */}
+        <div 
+          className={`flex flex-col items-end gap-3 transition-all duration-300 origin-bottom ${
+            isFabOpen 
+              ? 'opacity-100 scale-100 translate-y-0 pointer-events-auto' 
+              : 'opacity-0 scale-90 translate-y-10 pointer-events-none'
+          }`}
+        >
+          <button
+            onClick={handleClearAllDTCs}
+            className="flex items-center gap-3 px-4 py-2.5 rounded-full bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-950/50 transition-transform hover:scale-105"
+          >
+            <span className="text-sm font-bold">{t('quickClearAllDtc')}</span>
+            <Trash2 className="w-4 h-4" />
+          </button>
+          
+          <button
+            onClick={handleRequestVIN}
+            className="flex items-center gap-3 px-4 py-2.5 rounded-full bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-950/50 transition-transform hover:scale-105"
+          >
+            <span className="text-sm font-bold">{t('quickRequestVin')}</span>
+            <FileText className="w-4 h-4" />
+          </button>
+          
+          <button
+            onClick={handleQuickScanAction}
+            className="flex items-center gap-3 px-4 py-2.5 rounded-full bg-amber-500 hover:bg-amber-400 text-slate-900 shadow-lg shadow-amber-900/50 transition-transform hover:scale-105"
+          >
+            <span className="text-sm font-bold">{t('quickEcuScan')}</span>
+            <Search className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Main FAB Toggle */}
+        <button
+          onClick={() => setIsFabOpen(!isFabOpen)}
+          className={`p-4 rounded-full text-white shadow-xl transition-all duration-300 hover:scale-105 ${
+            isFabOpen ? 'bg-slate-700 hover:bg-slate-600 rotate-45' : 'bg-cyan-600 hover:bg-cyan-500'
+          }`}
+        >
+          <Plus className="w-6 h-6" />
+        </button>
       </div>
     </div>
   );

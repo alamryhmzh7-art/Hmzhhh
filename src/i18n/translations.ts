@@ -32,6 +32,14 @@ export const translations = {
     navAndroidCode: 'مشروع أندرويد وAPK',
     navUnitTests: 'فحص وتدقيق النظام',
 
+    // Quick Actions
+    quickClearAllDtc: 'مسح جميع الأعطال',
+    quickRequestVin: 'قراءة الشاسيه VIN',
+    quickEcuScan: 'فحص سريع للمحرك',
+    msgClearSuccess: 'تم إرسال أمر مسح الأعطال بنجاح (Mode 04).',
+    msgClearFail: 'فشل مسح الأعطال.',
+    msgNotConnected: 'غير متصل بالسيارة.',
+
     // Connection States
     CONNECTED: 'متصل',
     DISCONNECTED: 'غير متصل',
@@ -313,6 +321,14 @@ export const translations = {
     navSettings: 'Settings',
     navAndroidCode: 'Android & APK Code',
     navUnitTests: 'System Tests & Audit',
+
+    // Quick Actions
+    quickClearAllDtc: 'Clear All DTCs',
+    quickRequestVin: 'Request VIN',
+    quickEcuScan: 'Quick ECU Scan',
+    msgClearSuccess: 'Clear DTCs command sent successfully (Mode 04).',
+    msgClearFail: 'Failed to clear DTCs.',
+    msgNotConnected: 'Not connected to vehicle.',
 
     // Connection States
     CONNECTED: 'CONNECTED',

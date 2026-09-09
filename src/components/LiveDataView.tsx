@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { useI18n } from '../i18n/I18nContext';
 import { ObdPid, ConnectionStatus } from '../types';
 import { standardPids } from '../obd/pidDecoder';
-import { mockEcuServer } from '../network/mockEcuServer';
 import { transportManager } from '../network/TransportManager';
 import { 
   Gauge, 
@@ -22,15 +21,13 @@ import {
 
 interface LiveDataViewProps {
   status: ConnectionStatus;
-  isMockMode?: boolean;
+  isMockMode?: boolean; // Kept for prop signature but ignored for logic
 }
 
-export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode = false }) => {
+export const LiveDataView: React.FC<LiveDataViewProps> = ({ status }) => {
   const { t, isRtl } = useI18n();
   const [pids, setPids] = useState<ObdPid[]>(standardPids);
   const [isStreaming, setIsStreaming] = useState<boolean>(true);
-  const [simSpeed, setSimSpeed] = useState<number>(65);
-  const [simRpm, setSimRpm] = useState<number>(2200);
   const [history, setHistory] = useState<{ timestamp: string; rpm: number; speed: number; voltage: number }[]>([]);
 
   useEffect(() => {
@@ -44,55 +41,72 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
 
       const now = new Date().toLocaleTimeString();
       
-      // Initialize as null (NO DATA) for Real Mode to avoid fake fallbacks
-      let currentRpm: number | null = isMockMode ? 2200 : null;
-      let currentSpeed: number | null = isMockMode ? 65 : null;
-      let currentVolt: number | null = isMockMode ? 14.15 : null;
-      let currentCoolant: number | null = isMockMode ? 88 : null;
-      let currentTps: number | null = isMockMode ? 18 : null;
-      let currentLoad: number | null = isMockMode ? 26 : null;
+      let currentRpm: number | null = null;
+      let currentSpeed: number | null = null;
+      let currentVolt: number | null = null;
+      let currentCoolant: number | null = null;
+      let currentTps: number | null = null;
+      let currentLoad: number | null = null;
 
-      // Strict REAL/MOCK MODE: Comprehensive Polling of ALL standard OBD-II PIDs
       const updatedValues: { [key: string]: number | null } = {};
 
-      if (isMockMode) {
-        for (const p of standardPids) {
-          const simBytes = (mockEcuServer as any).handleObdMode01 ? (mockEcuServer as any).handleObdMode01(p.pidHex) : [];
-          updatedValues[p.pidHex] = p.decode(simBytes);
-        }
-        currentRpm = updatedValues['0C'] ?? 2200;
-        currentSpeed = updatedValues['0D'] ?? 65;
-        currentVolt = updatedValues['42'] ?? 14.15;
-        currentCoolant = updatedValues['05'] ?? 88;
-        currentTps = updatedValues['11'] ?? 18;
-        currentLoad = updatedValues['04'] ?? 26;
-
-        mockEcuServer.setRpm(currentRpm);
-        mockEcuServer.setSpeed(currentSpeed);
-      } else if (!isMockMode && status === 'CONNECTED') {
+      if (status === 'CONNECTED') {
         try {
           for (const p of standardPids) {
             if (!isStreaming) break;
+            
+            const targetCanId = '0x7DF';
+            const requestBytes = [0x01, parseInt(p.pidHex, 16)];
+
             try {
-              // Sequential request with explicit 250ms timeout per PID
-              const requestPromise = transportManager.sendRequest([0x01, parseInt(p.pidHex, 16)], '0x7DF');
+              // Sequential request with explicit 250ms timeout per PID for REAL mode
+              const requestPromise = transportManager.sendRequest(requestBytes, targetCanId);
               const timeoutPromise = new Promise<any>((_, reject) => 
-                setTimeout(() => reject(new Error('PID_TIMEOUT')), 250)
+                setTimeout(() => reject(new Error('PID_TIMEOUT')), 300)
               );
               
               const resp = await Promise.race([requestPromise, timeoutPromise]);
               if (resp && resp.status === 'SUCCESS' && resp.responseRaw) {
-                const bytes = resp.responseRaw.split(' ').map((b: string) => parseInt(b, 16));
-                if (bytes.length >= 2 && bytes[0] === 0x41 && bytes[1] === parseInt(p.pidHex, 16)) {
-                  updatedValues[p.pidHex] = p.decode(bytes);
+                const rxBytes = resp.responseRaw.split(' ').map((b: string) => parseInt(b, 16));
+                
+                if (rxBytes.length >= 2 && rxBytes[0] === 0x41 && rxBytes[1] === parseInt(p.pidHex, 16)) {
+                  const val = p.decode(rxBytes);
+                  updatedValues[p.pidHex] = val;
+                  
+                  // Strict proof chain logging
+                  console.log(JSON.stringify({
+                    timestamp: new Date().toISOString(),
+                    pid: p.pidHex,
+                    canTxId: targetCanId,
+                    txData: requestBytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' '),
+                    canRxId: resp.rxCanId || 'UNKNOWN',
+                    rxData: resp.responseRaw,
+                    decodedValue: val,
+                    source: 'REAL_CAN_RX'
+                  }));
+                } else {
+                  throw new Error('INVALID_RX_DATA');
                 }
+              } else {
+                throw new Error(resp?.status || 'NO_DATA');
               }
-            } catch (pidErr) {
-              // Individual PID timeout or error - continue to next PID without blocking
-              // console.debug(`[SCHEDULER] PID 0x${p.pidHex} timeout or failed`);
+            } catch (pidErr: any) {
+              // Individual PID timeout or error
+              updatedValues[p.pidHex] = null;
+              
+              console.log(JSON.stringify({
+                timestamp: new Date().toISOString(),
+                pid: p.pidHex,
+                canTxId: targetCanId,
+                txData: requestBytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' '),
+                status: 'FAIL',
+                error: pidErr.message,
+                source: 'REAL_CAN_RX'
+              }));
             }
+            
             // Throttling delay between PIDs to prevent CAN bus flooding and UI frame drops
-            await new Promise(r => setTimeout(r, 30));
+            await new Promise(r => setTimeout(r, 40));
           }
           currentRpm = updatedValues['0C'] !== undefined ? updatedValues['0C'] : null;
           currentSpeed = updatedValues['0D'] !== undefined ? updatedValues['0D'] : null;
@@ -113,11 +127,7 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
         let newRetry = currentRetry;
         let val = p.currentValue;
 
-        if (isMockMode) {
-          val = updatedValues[p.pidHex] !== undefined ? updatedValues[p.pidHex] : p.currentValue;
-          newStatus = 'SUPPORTED';
-          newRetry = 0;
-        } else if (status === 'CONNECTED') {
+        if (status === 'CONNECTED') {
           if (hasValue) {
             val = updatedValues[p.pidHex];
             newStatus = 'SUPPORTED';
@@ -155,10 +165,10 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
       }
       
       isPolling = false;
-    }, 1000); // Polling cycle every 1000ms to allow for sequential completion
+    }, 1000); // Polling cycle every 1000ms
 
     return () => clearInterval(interval);
-  }, [isStreaming, simRpm, simSpeed, status, isMockMode]);
+  }, [isStreaming, status]);
 
   const exportCsv = async () => {
     const headers = 'Timestamp,RPM,Speed(km/h),Voltage(V)\n';

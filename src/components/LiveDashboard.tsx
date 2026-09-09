@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { useI18n } from '../i18n/I18nContext';
 import { ConnectionStatus } from '../types';
 import { transportManager } from '../network/TransportManager';
-import { mockEcuServer } from '../network/mockEcuServer';
 import { standardPids } from '../obd/pidDecoder';
 import { Gauge } from './Gauge';
 import { Activity, Zap, Thermometer, Flame, Wind, GaugeCircle } from 'lucide-react';
@@ -12,16 +11,16 @@ interface LiveDashboardProps {
   isMockMode?: boolean;
 }
 
-export const LiveDashboard: React.FC<LiveDashboardProps> = ({ status, isMockMode = false }) => {
+export const LiveDashboard: React.FC<LiveDashboardProps> = ({ status }) => {
   const { t } = useI18n();
-  const [rpm, setRpm] = useState<number | null>(isMockMode ? 2200 : 0);
-  const [speed, setSpeed] = useState<number | null>(isMockMode ? 65 : 0);
-  const [coolant, setCoolant] = useState<number | null>(isMockMode ? 88 : 0);
-  const [load, setLoad] = useState<number | null>(isMockMode ? 28 : 0);
-  const [throttle, setThrottle] = useState<number | null>(isMockMode ? 18 : 0);
-  const [maf, setMaf] = useState<number | null>(isMockMode ? 4.2 : 0);
-  const [intakeTemp, setIntakeTemp] = useState<number | null>(isMockMode ? 32 : 0);
-  const [voltage, setVoltage] = useState<number | null>(isMockMode ? 14.2 : 0);
+  const [rpm, setRpm] = useState<number | null>(null);
+  const [speed, setSpeed] = useState<number | null>(null);
+  const [coolant, setCoolant] = useState<number | null>(null);
+  const [load, setLoad] = useState<number | null>(null);
+  const [throttle, setThrottle] = useState<number | null>(null);
+  const [maf, setMaf] = useState<number | null>(null);
+  const [intakeTemp, setIntakeTemp] = useState<number | null>(null);
+  const [voltage, setVoltage] = useState<number | null>(null);
   const [isPolling, setIsPolling] = useState<boolean>(false);
 
   useEffect(() => {
@@ -31,48 +30,93 @@ export const LiveDashboard: React.FC<LiveDashboardProps> = ({ status, isMockMode
       if (!isMounted || isPolling) return;
       setIsPolling(true);
 
-      if (isMockMode) {
-        const mockR = Math.round(2200 + Math.sin(Date.now() / 1000) * 300);
-        const mockS = Math.max(0, Math.round(65 + Math.sin(Date.now() / 3000) * 10));
-        setRpm(mockR);
-        setSpeed(mockS);
-        setCoolant(89);
-        setLoad(32);
-        setThrottle(20);
-        setMaf(4.8);
-        setIntakeTemp(33);
-        setVoltage(14.1);
-        mockEcuServer.setRpm(mockR);
-        mockEcuServer.setSpeed(mockS);
-      } else if (status === 'CONNECTED') {
+      if (status === 'CONNECTED') {
         try {
           for (const p of standardPids) {
             if (!isMounted) break;
-            const resp = await transportManager.sendRequest([0x01, parseInt(p.pidHex, 16)], '0x7DF');
-            if (resp.status === 'SUCCESS' && resp.responseRaw) {
-              const bytes = resp.responseRaw.split(' ').map(x => parseInt(x, 16));
-              if (bytes.length >= 2 && bytes[0] === 0x41 && bytes[1] === parseInt(p.pidHex, 16)) {
-                const val = p.decode(bytes);
-                if (val !== null) {
-                  if (p.pidHex === '0C') setRpm(val);
-                  else if (p.pidHex === '0D') setSpeed(val);
-                  else if (p.pidHex === '05') setCoolant(val);
-                  else if (p.pidHex === '04') setLoad(val);
-                  else if (p.pidHex === '11') setThrottle(val);
-                  else if (p.pidHex === '10') setMaf(val);
-                  else if (p.pidHex === '0F') setIntakeTemp(val);
-                  else if (p.pidHex === '42') setVoltage(val);
+            const targetCanId = '0x7DF';
+            const requestBytes = [0x01, parseInt(p.pidHex, 16)];
+            
+            try {
+              const requestPromise = transportManager.sendRequest(requestBytes, targetCanId);
+              const timeoutPromise = new Promise<any>((_, reject) => 
+                setTimeout(() => reject(new Error('ECU_TIMEOUT')), 300)
+              );
+              
+              const resp = await Promise.race([requestPromise, timeoutPromise]);
+
+              if (resp.status === 'SUCCESS' && resp.responseRaw) {
+                const rxBytes = resp.responseRaw.split(' ').map((x: string) => parseInt(x, 16));
+                if (rxBytes.length >= 2 && rxBytes[0] === 0x41 && rxBytes[1] === parseInt(p.pidHex, 16)) {
+                  const val = p.decode(rxBytes);
+                  
+                  // Proof chain logging
+                  console.log(JSON.stringify({
+                    timestamp: new Date().toISOString(),
+                    pid: p.pidHex,
+                    canTxId: targetCanId,
+                    txData: requestBytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' '),
+                    canRxId: resp.rxCanId || 'UNKNOWN',
+                    rxData: resp.responseRaw,
+                    decodedValue: val,
+                    source: 'REAL_CAN_RX'
+                  }));
+
+                  if (val !== null) {
+                    if (p.pidHex === '0C') setRpm(val);
+                    else if (p.pidHex === '0D') setSpeed(val);
+                    else if (p.pidHex === '05') setCoolant(val);
+                    else if (p.pidHex === '04') setLoad(val);
+                    else if (p.pidHex === '11') setThrottle(val);
+                    else if (p.pidHex === '10') setMaf(val);
+                    else if (p.pidHex === '0F') setIntakeTemp(val);
+                    else if (p.pidHex === '42') setVoltage(val);
+                  }
+                } else {
+                  throw new Error('INVALID_RX_DATA');
                 }
+              } else {
+                throw new Error(resp.status || 'NO_DATA');
               }
+            } catch (err: any) {
+              console.log(JSON.stringify({
+                timestamp: new Date().toISOString(),
+                pid: p.pidHex,
+                canTxId: targetCanId,
+                txData: requestBytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' '),
+                status: 'FAIL',
+                error: err.message,
+                source: 'REAL_CAN_RX'
+              }));
+
+              if (p.pidHex === '0C') setRpm(null);
+              else if (p.pidHex === '0D') setSpeed(null);
+              else if (p.pidHex === '05') setCoolant(null);
+              else if (p.pidHex === '04') setLoad(null);
+              else if (p.pidHex === '11') setThrottle(null);
+              else if (p.pidHex === '10') setMaf(null);
+              else if (p.pidHex === '0F') setIntakeTemp(null);
+              else if (p.pidHex === '42') setVoltage(null);
             }
+            // Add a short delay to prevent CAN bus overload
+            await new Promise(r => setTimeout(r, 40));
           }
         } catch (e) {
           console.error('[LIVE-DASH] Polling error:', e);
         }
+      } else {
+        setRpm(null);
+        setSpeed(null);
+        setCoolant(null);
+        setLoad(null);
+        setThrottle(null);
+        setMaf(null);
+        setIntakeTemp(null);
+        setVoltage(null);
       }
 
       if (isMounted) setIsPolling(false);
-    }, 800); // 800ms polling cycle to balance responsiveness and ECU bus load
+    }, 1000); // 800ms polling cycle to balance responsiveness and ECU bus load
 
     return () => {
       isMounted = false;
@@ -94,12 +138,12 @@ export const LiveDashboard: React.FC<LiveDashboardProps> = ({ status, isMockMode
         </div>
         <div className="flex items-center gap-3">
           <span className={`px-3 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 ${
-            status === 'CONNECTED' || isMockMode 
+            status === 'CONNECTED'
               ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-400' 
-              : 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400'
+              : 'bg-rose-100 text-rose-800 dark:bg-rose-900/30 dark:text-rose-400'
           }`}>
-            <span className={`w-2 h-2 rounded-full ${status === 'CONNECTED' || isMockMode ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
-            {isMockMode ? 'وضع المحاكاة (Demo Mode)' : status === 'CONNECTED' ? 'متصل بالسيارة (Connected)' : 'غير متصل (Disconnected)'}
+            <span className={`w-2 h-2 rounded-full ${status === 'CONNECTED' ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`} />
+            {status === 'CONNECTED' ? 'متصل بالسيارة (Real CAN Data)' : 'غير متصل (Disconnected)'}
           </span>
         </div>
       </div>
