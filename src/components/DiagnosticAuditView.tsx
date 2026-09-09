@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useI18n } from '../i18n/I18nContext';
 import { transportManager } from '../network/TransportManager';
 import { BinaryProtocol } from '../network/binaryProtocol';
 import { 
@@ -30,6 +31,7 @@ interface AuditStep {
 }
 
 export const DiagnosticAuditView: React.FC<{ status: ConnectionStatus }> = ({ status }) => {
+  const { t, isRtl } = useI18n();
   const [isRunning, setIsRunning] = useState(false);
   const [steps, setSteps] = useState<AuditStep[]>([
     { layer: 'Native Transport', status: 'NOT_TESTED', evidence: '-', description: 'Verifying Capacitor/Native Bridge connectivity' },
@@ -244,10 +246,10 @@ export const DiagnosticAuditView: React.FC<{ status: ConnectionStatus }> = ({ st
         <div>
           <h2 className="text-xl font-bold text-white flex items-center gap-2">
             <ShieldCheck className="h-6 w-6 text-cyan-400" />
-            System Audit & Proof Tracker
+            {t('auditTitle')}
           </h2>
           <p className="text-sm text-slate-400 mt-1">
-            End-to-end verification of the diagnostic communication path.
+            {isRtl ? 'التحقق الشامل من مسار بروتوكول وسلسلة الاتصال الفعلي مع السيارة' : 'End-to-end verification of the diagnostic communication path.'}
           </p>
         </div>
         <button
@@ -256,7 +258,7 @@ export const DiagnosticAuditView: React.FC<{ status: ConnectionStatus }> = ({ st
           className="px-6 py-3 bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-800 text-white font-bold rounded-xl transition-all shadow-lg shadow-cyan-950/40 flex items-center gap-2"
         >
           {isRunning ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Activity className="h-4 w-4" />}
-          Run Full Proof-Audit
+          {t('runUnitTests')}
         </button>
       </div>
 
@@ -264,10 +266,10 @@ export const DiagnosticAuditView: React.FC<{ status: ConnectionStatus }> = ({ st
         <table className="w-full text-left border-collapse">
           <thead>
             <tr className="bg-slate-900/80 border-b border-slate-800 text-xs font-bold text-slate-400 uppercase tracking-widest">
-              <th className="px-6 py-4">Layer / Component</th>
-              <th className="px-6 py-4">Status</th>
-              <th className="px-6 py-4">Evidence / Data</th>
-              <th className="px-6 py-4">Description</th>
+              <th className="px-6 py-4">{isRtl ? 'الوحدة / الطبقة' : 'Layer / Component'}</th>
+              <th className="px-6 py-4">{t('status')}</th>
+              <th className="px-6 py-4">{isRtl ? 'الأدلة والبيانات' : 'Evidence / Data'}</th>
+              <th className="px-6 py-4">{t('dtcDescription')}</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-900 font-mono text-sm">

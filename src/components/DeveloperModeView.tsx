@@ -116,7 +116,7 @@ export const DeveloperModeView: React.FC<DeveloperModeViewProps> = ({ status }) 
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            Raw AT / ELM327 Command Shell, Arbitrary HEX Packet Injector & Fault Simulation
+            {isRtl ? 'منصة تنفيذ أوامر AT و ELM327، وحقن حزم HEX لمحاكاة الأخطاء واختبار الشبكة' : 'Raw AT / ELM327 Command Shell, Arbitrary HEX Packet Injector & Fault Simulation'}
           </p>
         </div>
 
@@ -125,14 +125,14 @@ export const DeveloperModeView: React.FC<DeveloperModeViewProps> = ({ status }) 
           className="px-3 py-2 rounded-lg text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 flex items-center gap-1.5 transition-colors"
         >
           <Trash2 className="h-3.5 w-3.5" />
-          <span>Clear Shell</span>
+          <span>{isRtl ? 'مسح الشاشة' : 'Clear Shell'}</span>
         </button>
       </div>
 
       {/* Fault Simulator Buttons */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
         <span className="text-xs font-bold text-slate-400 uppercase tracking-wider block">
-          Diagnostic Fault & Exception Testing (Bench Validation)
+          {isRtl ? 'فحص واختبار الأخطاء والرموز البرمجية (اختبار طاولة الفحص)' : 'Diagnostic Fault & Exception Testing (Bench Validation)'}
         </span>
         <div className="flex flex-wrap items-center gap-2">
           <button
@@ -140,7 +140,7 @@ export const DeveloperModeView: React.FC<DeveloperModeViewProps> = ({ status }) 
             className="px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-600/20 hover:bg-amber-600 text-amber-300 hover:text-white border border-amber-500/40 transition-all flex items-center gap-1.5"
           >
             <ShieldAlert className="h-3.5 w-3.5" />
-            <span>Inject NRC 0x33 (Security Denied)</span>
+            <span>{isRtl ? 'حقن خطأ الأمان NRC 0x33' : 'Inject NRC 0x33 (Security Denied)'}</span>
           </button>
 
           <button
@@ -148,7 +148,7 @@ export const DeveloperModeView: React.FC<DeveloperModeViewProps> = ({ status }) 
             className="px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-600/20 hover:bg-amber-600 text-amber-300 hover:text-white border border-amber-500/40 transition-all flex items-center gap-1.5"
           >
             <AlertTriangle className="h-3.5 w-3.5" />
-            <span>Inject NRC 0x22 (Conditions Not Correct)</span>
+            <span>{isRtl ? 'حقن خطأ الشروط NRC 0x22' : 'Inject NRC 0x22 (Conditions Not Correct)'}</span>
           </button>
 
           <button
@@ -156,7 +156,7 @@ export const DeveloperModeView: React.FC<DeveloperModeViewProps> = ({ status }) 
             className="px-3 py-1.5 rounded-lg text-xs font-bold bg-rose-600/20 hover:bg-rose-600 text-rose-300 hover:text-white border border-rose-500/40 transition-all flex items-center gap-1.5"
           >
             <Zap className="h-3.5 w-3.5" />
-            <span>Simulate CAN Bus-Off Error</span>
+            <span>{isRtl ? 'محاكاة انقطاع شبكة CAN' : 'Simulate CAN Bus-Off Error'}</span>
           </button>
         </div>
       </div>

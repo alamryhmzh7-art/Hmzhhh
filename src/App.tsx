@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { I18nProvider, useI18n } from './i18n/I18nContext';
+import { ThemeProvider } from './services/ThemeContext';
 import { ConnectionConfig, ConnectionStatus, EcuLinkStatus, DiagnosticTroubleCode, VinInfo, ViewTab, EcuInfo, TransportType } from './types';
 import { KNOWN_ECU_NODES } from './ecu/ecuScanner';
 import { transportManager, defaultConnectionConfig } from './network/TransportManager';
@@ -431,9 +432,11 @@ const MainApp: React.FC = () => {
 export default function App() {
   return (
     <I18nProvider>
-      <AuthProvider>
-        <MainApp />
-      </AuthProvider>
+      <ThemeProvider>
+        <AuthProvider>
+          <MainApp />
+        </AuthProvider>
+      </ThemeProvider>
     </I18nProvider>
   );
 }

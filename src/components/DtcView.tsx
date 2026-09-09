@@ -417,7 +417,7 @@ export const DtcView: React.FC<DtcViewProps> = ({
             ) : (
               <div className="bg-slate-900 border border-slate-800 rounded-xl p-8 text-center text-slate-400 text-xs flex flex-col items-center justify-center">
                 <Info className="h-8 w-8 text-slate-600 mb-2" />
-                Select any DTC code on the left to view technical symptoms, root causes, fixes, and freeze frame telemetry.
+                {t('dtcSelectNotice')}
               </div>
             )}
           </div>

@@ -1,1 +1,61 @@
 @import "tailwindcss";
+
+@layer base {
+  html.daylight {
+    color-scheme: light;
+    background-color: #f1f5f9;
+    color: #0f172a;
+  }
+  html.dark {
+    color-scheme: dark;
+    background-color: #090d16;
+    color: #f8fafc;
+  }
+}
+
+/* Global Daylight High-Contrast Mode Overrides for Outdoor Automotive Visibility */
+html.daylight body {
+  background-color: #f1f5f9 !important;
+  color: #0f172a !important;
+}
+
+html.daylight .bg-slate-950,
+html.daylight .bg-slate-900,
+html.daylight .bg-slate-900\/90,
+html.daylight .bg-slate-900\/50,
+html.daylight .bg-slate-900\/80,
+html.daylight .bg-slate-800 {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+  border-color: #cbd5e1 !important;
+}
+
+html.daylight .text-white,
+html.daylight .text-slate-100,
+html.daylight .text-slate-200,
+html.daylight .text-slate-300 {
+  color: #0f172a !important;
+}
+
+html.daylight .text-slate-400,
+html.daylight .text-slate-500 {
+  color: #475569 !important;
+}
+
+html.daylight .border-slate-800,
+html.daylight .border-slate-700,
+html.daylight .border-slate-600 {
+  border-color: #cbd5e1 !important;
+}
+
+html.daylight input,
+html.daylight select,
+html.daylight textarea {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+  border-color: #94a3b8 !important;
+}
+
+html.daylight button:not(.bg-blue-600):not(.bg-emerald-600):not(.bg-rose-600):not(.bg-amber-600):not(.bg-purple-600) {
+  border-color: #cbd5e1 !important;
+}

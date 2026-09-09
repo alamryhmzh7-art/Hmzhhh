@@ -149,7 +149,7 @@ export const CanMonitorView: React.FC<CanMonitorViewProps> = ({ status }) => {
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            Real-time ISO 11898 CAN Bus 2.0A / 2.0B Frame Sniffer & Injector
+            {isRtl ? 'استكشاف وحقن إطارات ناقل حركة CAN (ISO 11898 CAN Bus 2.0A / 2.0B)' : 'Real-time ISO 11898 CAN Bus 2.0A / 2.0B Frame Sniffer & Injector'}
           </p>
         </div>
 
@@ -176,7 +176,7 @@ export const CanMonitorView: React.FC<CanMonitorViewProps> = ({ status }) => {
             }`}
           >
             <Activity className="h-3.5 w-3.5 animate-pulse" />
-            <span>{isSniffing ? 'Sniffing (5s)...' : 'Run Raw CAN Sniff Test'}</span>
+            <span>{isSniffing ? t('sniffing') : t('runCanSniffTest')}</span>
           </button>
 
           <button
@@ -184,7 +184,7 @@ export const CanMonitorView: React.FC<CanMonitorViewProps> = ({ status }) => {
             className="px-3 py-2 rounded-lg text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 flex items-center gap-1.5 transition-colors"
           >
             <Trash2 className="h-3.5 w-3.5" />
-            <span>{t('clear')}</span>
+            <span>{t('btnClear')}</span>
           </button>
 
           <button
@@ -213,7 +213,7 @@ export const CanMonitorView: React.FC<CanMonitorViewProps> = ({ status }) => {
       {/* Manual CAN Frame Injector */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
         <span className="text-xs font-bold text-slate-400 uppercase tracking-wider block">
-          Manual CAN Frame Injector (Transmit Tx)
+          {t('manualFrameInject')}
         </span>
         <div className="flex flex-wrap items-center gap-3">
           <div className="w-32">
@@ -239,7 +239,7 @@ export const CanMonitorView: React.FC<CanMonitorViewProps> = ({ status }) => {
             className="px-4 py-2 rounded-lg text-xs font-bold bg-cyan-600 hover:bg-cyan-500 text-white flex items-center gap-1.5 shadow-md transition-all"
           >
             <Send className="h-3.5 w-3.5" />
-            <span>Transmit Frame</span>
+            <span>{t('transmitFrame')}</span>
           </button>
         </div>
       </div>
@@ -256,7 +256,7 @@ export const CanMonitorView: React.FC<CanMonitorViewProps> = ({ status }) => {
         />
         {filterId && (
           <button onClick={() => setFilterId('')} className="text-xs text-slate-400 hover:text-white">
-            Clear
+            {t('btnClear')}
           </button>
         )}
       </div>
@@ -265,19 +265,19 @@ export const CanMonitorView: React.FC<CanMonitorViewProps> = ({ status }) => {
       <div className="bg-slate-950 border border-slate-800 rounded-xl overflow-hidden shadow-2xl font-mono text-xs">
         {/* Table Header */}
         <div className="grid grid-cols-12 bg-slate-900/90 px-4 py-2.5 text-[11px] font-bold text-slate-400 border-b border-slate-800">
-          <div className="col-span-2">Timestamp</div>
-          <div className="col-span-1 text-center">Dir</div>
-          <div className="col-span-2">CAN ID</div>
-          <div className="col-span-1 text-center">DLC</div>
-          <div className="col-span-4">DATA (HEX BYTES)</div>
-          <div className="col-span-2 text-right">Description</div>
+          <div className="col-span-2">{t('canTimestamp')}</div>
+          <div className="col-span-1 text-center">{t('canDirection')}</div>
+          <div className="col-span-2">{t('canId')}</div>
+          <div className="col-span-1 text-center">{t('canDlc')}</div>
+          <div className="col-span-4">{t('canDataHex')}</div>
+          <div className="col-span-2 text-right">{t('dtcDescription')}</div>
         </div>
 
         {/* Frames List */}
         <div className="max-h-[480px] overflow-y-auto divide-y divide-slate-900 p-2 space-y-0.5">
           {filteredFrames.length === 0 ? (
             <div className="text-center py-12 text-slate-600 text-xs">
-              No CAN frames received yet. Ensure ESP32 is connected and CAN bus traffic is active.
+              {isRtl ? 'لم يتم استلام أي إطارات CAN بعد. تأكد من توصيل قطعة ESP32 ووجود نشاط على شبكة السيارة.' : 'No CAN frames received yet. Ensure ESP32 is connected and CAN bus traffic is active.'}
             </div>
           ) : (
             filteredFrames.map((frame, idx) => {

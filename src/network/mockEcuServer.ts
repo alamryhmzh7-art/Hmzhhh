@@ -204,30 +204,51 @@ export class MockEcuServer {
         const val = Math.round((this.currentLoad * 255) / 100);
         return [0x41, 0x04, val & 0xFF];
       }
+      case '0A': { // Fuel Pressure
+        return [0x41, 0x0A, 100];
+      }
+      case '0F': { // Intake Air Temp
+        return [0x41, 0x0F, 72];
+      }
+      case '10': { // MAF Flow Rate
+        return [0x41, 0x10, 0x01, 0xA4];
+      }
+      case '06': { // STFT1
+        return [0x41, 0x06, 131];
+      }
+      case '07': { // LTFT1
+        return [0x41, 0x07, 126];
+      }
+      case '0E': { // Timing Advance
+        return [0x41, 0x0E, 156];
+      }
       case '42': { // Control Module Voltage
         const val = Math.round(this.currentVoltage * 1000);
         return [0x41, 0x42, (val >> 8) & 0xFF, val & 0xFF];
       }
-      case '10': { // MAF Flow Rate (e.g. 3.85 g/s -> 385)
-        return [0x41, 0x10, 0x01, 0x81];
+      case '2F': { // Fuel Tank Level
+        return [0x41, 0x2F, 166];
       }
-      case '06': { // STFT1 (e.g. +2.3% -> 128 + 3 = 131)
-        return [0x41, 0x06, 0x83];
+      case '1F': { // Run Time Since Start
+        return [0x41, 0x1F, 0x04, 0xE2];
       }
-      case '07': { // LTFT1 (e.g. -1.5% -> 128 - 2 = 126)
-        return [0x41, 0x07, 0x7E];
+      case '33': { // Absolute Barometric Pressure
+        return [0x41, 0x33, 101];
       }
-      case '0E': { // Timing Advance (e.g. 14 deg -> 14*2 + 128 = 156)
-        return [0x41, 0x0E, 0x9C];
+      case '46': { // Ambient Air Temperature
+        return [0x41, 0x46, 65];
       }
-      case '0F': { // Intake Air Temp (32°C -> 32 + 40 = 72)
-        return [0x41, 0x0F, 0x48];
+      case '14': { // Oxygen Sensor 1 Voltage (0.45V -> 90)
+        return [0x41, 0x14, 90, 128];
       }
-      case '2F': { // Fuel Tank Level (65% -> 166)
-        return [0x41, 0x2F, 0xA6];
+      case '5D': { // Fuel Injection Timing (3.5 deg -> ((3.5 + 210) * 128) = 27328 -> 0x6AC0)
+        return [0x41, 0x5D, 0x6A, 0xC0];
+      }
+      case '22': { // Fuel Rail Pressure (300 kPa -> 300 / 0.079 = 3797 -> 0x0ED5)
+        return [0x41, 0x22, 0x0E, 0xD5];
       }
       default:
-        return [0x41, parseInt(pid, 16) || 0x00, 0x00];
+        return [0x41, parseInt(pid, 16) || 0x00, 0x55];
     }
   }
 

@@ -320,6 +320,66 @@ export const standardPids: ObdPid[] = [
       if (bytes.length < 1) return 0;
       return bytes[0] - 40;
     }
+  },
+  {
+    id: '14',
+    pidHex: '14',
+    mode: 1,
+    name: 'Oxygen Sensor 1 Voltage',
+    nameAr: 'حساس الأكسجين 1 (جهد)',
+    shortName: 'O2S1',
+    unit: 'V',
+    min: 0,
+    max: 1.275,
+    currentValue: 0,
+    formula: 'A / 200',
+    bytesCount: 1,
+    category: 'fuel',
+    history: [],
+    decode: (bytes: number[]) => {
+      if (bytes.length < 1) return 0;
+      return parseFloat((bytes[0] / 200).toFixed(3));
+    }
+  },
+  {
+    id: '5D',
+    pidHex: '5D',
+    mode: 1,
+    name: 'Fuel Injection Timing',
+    nameAr: 'توقيت حقن الوقود',
+    shortName: 'Inj Timing',
+    unit: '°',
+    min: -210,
+    max: 301.996,
+    currentValue: 0,
+    formula: '((A * 256) + B) / 128 - 210',
+    bytesCount: 2,
+    category: 'fuel',
+    history: [],
+    decode: (bytes: number[]) => {
+      if (bytes.length < 2) return 0;
+      return parseFloat(((((bytes[0] * 256) + bytes[1]) / 128) - 210).toFixed(2));
+    }
+  },
+  {
+    id: '22',
+    pidHex: '22',
+    mode: 1,
+    name: 'Fuel Rail Pressure (Manifold)',
+    nameAr: 'ضغط سكة الوقود (مطلق)',
+    shortName: 'Rail Press',
+    unit: 'kPa',
+    min: 0,
+    max: 5177.26,
+    currentValue: 0,
+    formula: '((A * 256) + B) * 0.079',
+    bytesCount: 2,
+    category: 'fuel',
+    history: [],
+    decode: (bytes: number[]) => {
+      if (bytes.length < 2) return 0;
+      return parseFloat((((bytes[0] * 256) + bytes[1]) * 0.079).toFixed(1));
+    }
   }
 ];
 

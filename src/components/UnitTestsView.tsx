@@ -446,7 +446,7 @@ export const UnitTestsView: React.FC = () => {
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            Automated Diagnostic Protocol Assertion Suite (ISO 15765, ISO 14229, ISO 3779, Redaction, i18n)
+            {isRtl ? 'حزمة الاختبارات الآلية للتحقق من سلامة معايير البروتوكول (ISO 15765, ISO 14229, ISO 3779)' : 'Automated Diagnostic Protocol Assertion Suite (ISO 15765, ISO 14229, ISO 3779, Redaction, i18n)'}
           </p>
         </div>
 
@@ -456,7 +456,7 @@ export const UnitTestsView: React.FC = () => {
           className="px-5 py-2.5 rounded-lg text-xs font-bold bg-teal-600 hover:bg-teal-500 text-white flex items-center gap-2 transition-all shadow-md shadow-teal-950/50 disabled:opacity-50"
         >
           <Play className={`h-4 w-4 ${isRunningAll ? 'animate-spin' : ''}`} />
-          <span>{isRunningAll ? 'Running Test Suite...' : 'Run All Test Assertions'}</span>
+          <span>{isRunningAll ? (isRtl ? 'جاري تنفيذ الاختيارات...' : 'Running Test Suite...') : (isRtl ? 'تشغيل حزمة الفحوصات' : 'Run All Test Assertions')}</span>
         </button>
       </div>
 

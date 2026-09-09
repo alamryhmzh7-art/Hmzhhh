@@ -52,76 +52,85 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
       let currentTps: number | null = isMockMode ? 18 : null;
       let currentLoad: number | null = isMockMode ? 26 : null;
 
+      // Strict REAL/MOCK MODE: Comprehensive Polling of ALL standard OBD-II PIDs
+      const updatedValues: { [key: string]: number | null } = {};
+
       if (isMockMode) {
-        // Simulation mode ONLY when Demo Mode is explicitly active
-        currentRpm = Math.round(simRpm + (Math.sin(Date.now() / 1000) * 120) + (Math.random() * 30));
-        currentSpeed = Math.max(0, Math.round(simSpeed + (Math.sin(Date.now() / 3000) * 4)));
-        currentVolt = parseFloat((14.15 + Math.sin(Date.now() / 4000) * 0.12).toFixed(2));
-        currentCoolant = Math.round(88 + Math.sin(Date.now() / 15000) * 3);
-        currentTps = Math.round(18 + Math.sin(Date.now() / 2000) * 5);
-        currentLoad = Math.round(26 + Math.sin(Date.now() / 2500) * 6);
+        for (const p of standardPids) {
+          const simBytes = (mockEcuServer as any).handleObdMode01 ? (mockEcuServer as any).handleObdMode01(p.pidHex) : [];
+          updatedValues[p.pidHex] = p.decode(simBytes);
+        }
+        currentRpm = updatedValues['0C'] ?? 2200;
+        currentSpeed = updatedValues['0D'] ?? 65;
+        currentVolt = updatedValues['42'] ?? 14.15;
+        currentCoolant = updatedValues['05'] ?? 88;
+        currentTps = updatedValues['11'] ?? 18;
+        currentLoad = updatedValues['04'] ?? 26;
 
         mockEcuServer.setRpm(currentRpm);
         mockEcuServer.setSpeed(currentSpeed);
-      }
-
-      // Strict REAL MODE: Sequential Polling (One PID at a time)
-      if (!isMockMode && status === 'CONNECTED') {
+      } else if (!isMockMode && status === 'CONNECTED') {
         try {
-          // 1. Poll RPM (PID 0x0C)
-          const respRpm = await transportManager.sendRequest([0x01, 0x0C], '0x7DF');
-          if (respRpm.status === 'SUCCESS' && respRpm.responseRaw) {
-            const bytes = respRpm.responseRaw.split(' ').map(b => parseInt(b, 16));
-            if (bytes.length >= 4 && bytes[0] === 0x41 && bytes[1] === 0x0C) {
-              currentRpm = Math.round(((bytes[2] * 256) + bytes[3]) / 4);
+          for (const p of standardPids) {
+            if (!isStreaming) break;
+            try {
+              // Sequential request with explicit 250ms timeout per PID
+              const requestPromise = transportManager.sendRequest([0x01, parseInt(p.pidHex, 16)], '0x7DF');
+              const timeoutPromise = new Promise<any>((_, reject) => 
+                setTimeout(() => reject(new Error('PID_TIMEOUT')), 250)
+              );
+              
+              const resp = await Promise.race([requestPromise, timeoutPromise]);
+              if (resp && resp.status === 'SUCCESS' && resp.responseRaw) {
+                const bytes = resp.responseRaw.split(' ').map((b: string) => parseInt(b, 16));
+                if (bytes.length >= 2 && bytes[0] === 0x41 && bytes[1] === parseInt(p.pidHex, 16)) {
+                  updatedValues[p.pidHex] = p.decode(bytes);
+                }
+              }
+            } catch (pidErr) {
+              // Individual PID timeout or error - continue to next PID without blocking
+              // console.debug(`[SCHEDULER] PID 0x${p.pidHex} timeout or failed`);
             }
+            // Throttling delay between PIDs to prevent CAN bus flooding and UI frame drops
+            await new Promise(r => setTimeout(r, 30));
           }
-
-          // 2. Poll Speed (PID 0x0D)
-          const respSpeed = await transportManager.sendRequest([0x01, 0x0D], '0x7DF');
-          if (respSpeed.status === 'SUCCESS' && respSpeed.responseRaw) {
-            const bytes = respSpeed.responseRaw.split(' ').map(b => parseInt(b, 16));
-            if (bytes.length >= 3 && bytes[0] === 0x41 && bytes[1] === 0x0D) {
-              currentSpeed = bytes[2];
-            }
-          }
-
-          // 3. Poll Coolant (PID 0x05)
-          const respCoolant = await transportManager.sendRequest([0x01, 0x05], '0x7DF');
-          if (respCoolant.status === 'SUCCESS' && respCoolant.responseRaw) {
-            const bytes = respCoolant.responseRaw.split(' ').map(b => parseInt(b, 16));
-            if (bytes.length >= 3 && bytes[0] === 0x41 && bytes[1] === 0x05) {
-              currentCoolant = bytes[2] - 40;
-            }
-          }
-
-          // 4. Poll Module Voltage (PID 0x42)
-          const respVolt = await transportManager.sendRequest([0x01, 0x42], '0x7DF');
-          if (respVolt.status === 'SUCCESS' && respVolt.responseRaw) {
-            const bytes = respVolt.responseRaw.split(' ').map(b => parseInt(b, 16));
-            if (bytes.length >= 4 && bytes[0] === 0x41 && bytes[1] === 0x42) {
-              currentVolt = parseFloat((((bytes[2] * 256) + bytes[3]) / 1000).toFixed(2));
-            }
-          }
+          currentRpm = updatedValues['0C'] !== undefined ? updatedValues['0C'] : null;
+          currentSpeed = updatedValues['0D'] !== undefined ? updatedValues['0D'] : null;
+          currentVolt = updatedValues['42'] !== undefined ? updatedValues['42'] : null;
+          currentCoolant = updatedValues['05'] !== undefined ? updatedValues['05'] : null;
+          currentTps = updatedValues['11'] !== undefined ? updatedValues['11'] : null;
+          currentLoad = updatedValues['04'] !== undefined ? updatedValues['04'] : null;
         } catch (e: any) {
           console.error(`[POLL-ERROR] Cycle failed: ${e?.message}`);
         }
       }
 
       setPids(prev => prev.map(p => {
-        let val: number | null = null;
+        const hasValue = updatedValues[p.pidHex] !== undefined && updatedValues[p.pidHex] !== null;
+        const currentRetry = p.retryCount || 0;
         
-        // Match specific PIDs being polled
-        if (p.pidHex === '0C') val = currentRpm;
-        else if (p.pidHex === '0D') val = currentSpeed;
-        else if (p.pidHex === '05') val = currentCoolant;
-        else if (p.pidHex === '11') val = currentTps;
-        else if (p.pidHex === '04') val = currentLoad;
-        else if (p.pidHex === '42') val = currentVolt;
-        else {
-          // If we are not polling this PID in the current loop, keep its value IF we are in Mock Mode
-          // Otherwise, if in Real Mode and Disconnected, it must be null.
-          val = isMockMode ? p.currentValue : (status === 'CONNECTED' ? p.currentValue : null);
+        let newStatus = p.status || 'UNKNOWN';
+        let newRetry = currentRetry;
+        let val = p.currentValue;
+
+        if (isMockMode) {
+          val = updatedValues[p.pidHex] !== undefined ? updatedValues[p.pidHex] : p.currentValue;
+          newStatus = 'SUPPORTED';
+          newRetry = 0;
+        } else if (status === 'CONNECTED') {
+          if (hasValue) {
+            val = updatedValues[p.pidHex];
+            newStatus = 'SUPPORTED';
+            newRetry = 0;
+          } else {
+            newRetry = currentRetry + 1;
+            if (newRetry >= 3) {
+              newStatus = 'NOT_SUPPORTED';
+              val = null;
+            }
+          }
+        } else {
+          val = null;
         }
 
         const numVal = typeof val === 'number' ? val : 0;
@@ -129,6 +138,8 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
         return {
           ...p,
           currentValue: val,
+          status: newStatus as any,
+          retryCount: newRetry,
           minValue: val !== null ? Math.min(p.minValue, numVal) : p.minValue,
           maxValue: val !== null ? Math.max(p.maxValue, numVal) : p.maxValue
         };
@@ -225,7 +236,7 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
             {t('liveDataTitle')}
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Sequential ECU PID Polling (ISO 15765-4)
+            {isRtl ? 'استعلام تسلسلي لحساسات ECU بروتوكول (ISO 15765-4)' : 'Sequential ECU PID Polling (ISO 15765-4)'}
           </p>
         </div>
 
@@ -266,7 +277,7 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg relative overflow-hidden">
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold text-cyan-400 uppercase tracking-wider font-mono">
-              PID 0x0C — ENGINE TACHOMETER
+              PID 0x0C — {isRtl ? 'عدّاد دوران المحرك (Tachometer)' : 'ENGINE TACHOMETER'}
             </span>
             <span className="text-xs text-slate-400 font-mono">0 - 8000 RPM</span>
           </div>
@@ -325,7 +336,7 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg relative overflow-hidden">
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider font-mono">
-              PID 0x0D — VEHICLE SPEED
+              PID 0x0D — {isRtl ? 'عدّاد سرعة المركبة (Speedometer)' : 'VEHICLE SPEED'}
             </span>
             <span className="text-xs text-slate-400 font-mono">0 - 260 km/h</span>
           </div>
@@ -385,12 +396,12 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
         <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-4">
           <div className="flex items-center gap-2 text-xs font-bold text-slate-300 mb-3">
             <Sliders className="h-4 w-4 text-cyan-400" />
-            <span>Interactive ECU Telemetry Simulator Controls (Workbench)</span>
+            <span>{isRtl ? 'أدوات التحكم في محاكي بيانات كمبيوتر السيارة (طاولة الفحص)' : 'Interactive ECU Telemetry Simulator Controls (Workbench)'}</span>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <div className="flex justify-between text-xs text-slate-400 mb-1">
-                <span>Target RPM ({simRpm} RPM)</span>
+                <span>{isRtl ? `دوران المحرك المستهدف (${simRpm} RPM)` : `Target RPM (${simRpm} RPM)`}</span>
                 <span>Max: 8000</span>
               </div>
               <input
@@ -405,7 +416,7 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
             </div>
             <div>
               <div className="flex justify-between text-xs text-slate-400 mb-1">
-                <span>Target Speed ({simSpeed} km/h)</span>
+                <span>{isRtl ? `السرعة المستهدفة (${simSpeed} كم/س)` : `Target Speed (${simSpeed} km/h)`}</span>
                 <span>Max: 240</span>
               </div>
               <input
@@ -425,7 +436,7 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
       {/* All Monitored PIDs Grid */}
       <div>
         <h3 className="text-sm font-bold text-slate-300 uppercase tracking-wider mb-3">
-          All Standard Monitored PIDs (Mode 01)
+          {isRtl ? 'جميع حساسات وقراءات OBD-II القياسية (Mode 01)' : 'All Standard Monitored PIDs (Mode 01)'}
         </h3>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
@@ -444,13 +455,19 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status, isMockMode =
               </div>
 
               <div className="my-3 flex items-baseline justify-between">
-                <span className="text-2xl font-extrabold text-white font-mono tracking-tight">
-                  {pid.currentValue !== null 
-                    ? (typeof pid.currentValue === 'number' 
-                        ? pid.currentValue.toFixed(pid.unit === 'V' ? 2 : 0) 
-                        : pid.currentValue) 
-                    : 'N/A'}
-                </span>
+                {pid.status === 'NOT_SUPPORTED' ? (
+                  <span className="text-xs font-bold text-amber-400 bg-amber-950/40 px-2 py-1 rounded border border-amber-800/50 font-mono">
+                    {isRtl ? 'غير مدعوم من السيارة' : 'Not Supported'}
+                  </span>
+                ) : (
+                  <span className="text-2xl font-extrabold text-white font-mono tracking-tight">
+                    {pid.currentValue !== null 
+                      ? (typeof pid.currentValue === 'number' 
+                          ? pid.currentValue.toFixed(pid.unit === 'V' ? 2 : 0) 
+                          : pid.currentValue) 
+                      : 'N/A'}
+                  </span>
+                )}
                 <span className="text-xs font-bold text-slate-400 font-mono">
                   {pid.unit}
                 </span>

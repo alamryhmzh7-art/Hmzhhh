@@ -68,7 +68,7 @@ export const OtaView: React.FC<OtaViewProps> = ({ status }) => {
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            Wireless ESP32 TWAI/CAN Firmware Update with Dual-Partition Rollback Protection
+            {isRtl ? 'تحديث البرمجيات الثابتة للشبكة اللاسلكية لوحدة ESP32 مع حماية التراجع التلقائي' : 'Wireless ESP32 TWAI/CAN Firmware Update with Dual-Partition Rollback Protection'}
           </p>
         </div>
       </div>
@@ -76,19 +76,19 @@ export const OtaView: React.FC<OtaViewProps> = ({ status }) => {
       {/* Hardware Flash Metadata */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl">
-          <span className="text-[10px] text-slate-500 uppercase font-mono block">Installed Firmware</span>
+          <span className="text-[10px] text-slate-500 uppercase font-mono block">{isRtl ? 'البرنامج الثابت الحالي' : 'Installed Firmware'}</span>
           <span className="text-sm font-bold text-white font-mono mt-1 block">{firmwareVersion}</span>
-          <span className="text-[10px] text-emerald-400 font-mono mt-0.5 block">Active Boot Partition: OTA_0</span>
+          <span className="text-[10px] text-emerald-400 font-mono mt-0.5 block">{isRtl ? 'قسم الإقلاع النشط: OTA_0' : 'Active Boot Partition: OTA_0'}</span>
         </div>
 
         <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl">
-          <span className="text-[10px] text-slate-500 uppercase font-mono block">ESP32 Hardware ID</span>
+          <span className="text-[10px] text-slate-500 uppercase font-mono block">{isRtl ? 'معرف قطعة ESP32' : 'ESP32 Hardware ID'}</span>
           <span className="text-sm font-bold text-cyan-400 font-mono mt-1 block">ESP32-D0WD-V3 (Dual Core)</span>
           <span className="text-[10px] text-slate-400 font-mono mt-0.5 block">Flash: 4MB Flash @ 80MHz</span>
         </div>
 
         <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl">
-          <span className="text-[10px] text-slate-500 uppercase font-mono block">CAN Controller</span>
+          <span className="text-[10px] text-slate-500 uppercase font-mono block">{isRtl ? 'متحكم شريحة CAN' : 'CAN Controller'}</span>
           <span className="text-sm font-bold text-purple-400 font-mono mt-1 block">TWAI (ISO 11898-1)</span>
           <span className="text-[10px] text-slate-400 font-mono mt-0.5 block">Transceiver: SN65HVD230</span>
         </div>
@@ -98,13 +98,13 @@ export const OtaView: React.FC<OtaViewProps> = ({ status }) => {
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-5">
         <h3 className="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
           <UploadCloud className="h-5 w-5 text-emerald-400" />
-          <span>Over-The-Air Binary Flasher</span>
+          <span>{isRtl ? 'أداة رفع وتثبيت البرنامج الثابت لاسلكيًا' : 'Over-The-Air Binary Flasher'}</span>
         </h3>
 
         <div className="border-2 border-dashed border-slate-700 hover:border-emerald-500/50 rounded-xl p-6 text-center transition-colors bg-slate-950/40">
           <FileCode className="h-10 w-10 text-emerald-400 mx-auto mb-2" />
           <h4 className="font-bold text-sm text-white">{selectedFile}</h4>
-          <p className="text-xs text-slate-400 mt-1">Compiled ESP32 Factory Binary Image (Size: 1.42 MB | SHA-256: 8F4B9...A2)</p>
+          <p className="text-xs text-slate-400 mt-1">{isRtl ? 'ملف التحديث المجمع لوحدة ESP32 (الحجم: 1.42 ميجابايت)' : 'Compiled ESP32 Factory Binary Image (Size: 1.42 MB | SHA-256: 8F4B9...A2)'}</p>
         </div>
 
         {/* Progress Bar */}
@@ -131,8 +131,8 @@ export const OtaView: React.FC<OtaViewProps> = ({ status }) => {
           <div className="bg-emerald-500/10 border border-emerald-500/40 rounded-xl p-4 flex items-center gap-3 text-emerald-400">
             <CheckCircle2 className="h-6 w-6 shrink-0" />
             <div>
-              <h4 className="font-bold text-sm">ESP32 Firmware Updated Successfully!</h4>
-              <p className="text-xs text-slate-300">Device rebooted and active with firmware version v2.5.1-PRO.</p>
+              <h4 className="font-bold text-sm">{isRtl ? 'تم تحديث البرنامج الثابت لوحدة ESP32 بنجاح!' : 'ESP32 Firmware Updated Successfully!'}</h4>
+              <p className="text-xs text-slate-300">{isRtl ? 'تمت إعادة تشغيل الجهاز والعمل بالإصدار v2.5.1-PRO.' : 'Device rebooted and active with firmware version v2.5.1-PRO.'}</p>
             </div>
           </div>
         )}
@@ -145,7 +145,7 @@ export const OtaView: React.FC<OtaViewProps> = ({ status }) => {
             className="px-6 py-3 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white flex items-center gap-2 shadow-lg shadow-emerald-950/60 transition-all disabled:opacity-50"
           >
             {isFlashing ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />}
-            <span>{isFlashing ? 'Flashing ESP32...' : 'Flash Firmware via Wi-Fi'}</span>
+            <span>{isFlashing ? (isRtl ? 'جاري تثبيت التحديث...' : 'Flashing ESP32...') : (isRtl ? 'تحديث عبر الـ Wi-Fi' : 'Flash Firmware via Wi-Fi')}</span>
           </button>
         </div>
       </div>

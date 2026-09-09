@@ -1,5 +1,6 @@
 import React from 'react';
 import { useI18n } from '../i18n/I18nContext';
+import { useTheme } from '../services/ThemeContext';
 import { ConnectionStatus, ConnectionConfig, EcuLinkStatus } from '../types';
 import { useAuth } from '../services/AuthContext';
 import { 
@@ -16,7 +17,9 @@ import {
   Settings2,
   LogIn,
   LogOut,
-  User as UserIcon
+  User as UserIcon,
+  Sun,
+  Moon
 } from 'lucide-react';
 
 interface HeaderProps {
@@ -49,6 +52,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenConnectionManager
 }) => {
   const { language, setLanguage, isRtl, t } = useI18n();
+  const { theme, toggleTheme } = useTheme();
 
   const handleConnectToggle = () => {
     if (onToggleConnect) {
@@ -200,6 +204,20 @@ export const Header: React.FC<HeaderProps> = ({
               <span>{language === 'ar' ? 'فحص الرابط' : 'Check Link'}</span>
             </button>
           )}
+
+          {/* Theme Toggle (Daylight / Dark) */}
+          <button
+            onClick={toggleTheme}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors ${
+              theme === 'daylight'
+                ? 'bg-amber-100 hover:bg-amber-200 text-amber-900 border-amber-300'
+                : 'bg-slate-800 hover:bg-slate-700 text-amber-400 border-slate-700'
+            }`}
+            title={language === 'ar' ? 'تبديل وضع النهار عالي التباين / الوضع الليلي' : 'Toggle Daylight / Dark Mode'}
+          >
+            {theme === 'daylight' ? <Sun className="h-3.5 w-3.5 text-amber-700" /> : <Moon className="h-3.5 w-3.5 text-amber-400" />}
+            <span>{language === 'ar' ? (theme === 'daylight' ? 'وضع النهار ☀️' : 'الوضع الليلي 🌙') : (theme === 'daylight' ? 'Daylight ☀️' : 'Dark Mode 🌙')}</span>
+          </button>
 
           {/* Language Toggle */}
           <button

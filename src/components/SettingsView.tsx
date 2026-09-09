@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useI18n } from '../i18n/I18nContext';
+import { useTheme } from '../services/ThemeContext';
 import { ConnectionConfig, ConnectionStatus, TransportType } from '../types';
 import { ESP32_DUAL_TRANSPORT_FIRMWARE_INO } from '../firmware/esp32_firmware_source';
 import { useAuth } from '../services/AuthContext';
@@ -18,7 +19,9 @@ import {
   CheckCircle2,
   Code,
   Copy,
-  Download
+  Download,
+  Sun,
+  Moon
 } from 'lucide-react';
 
 interface SettingsViewProps {
@@ -29,6 +32,7 @@ interface SettingsViewProps {
 
 export const SettingsView: React.FC<SettingsViewProps> = ({ config, setConfig, status }) => {
   const { t, language, setLanguage, isRtl } = useI18n();
+  const { theme, setTheme } = useTheme();
   const { user, savePreferences } = useAuth();
   const [formData, setFormData] = useState<ConnectionConfig>({ ...config });
   const [savedSuccess, setSavedSuccess] = useState<boolean>(false);
@@ -357,6 +361,60 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ config, setConfig, s
                 <p className="text-xs text-slate-400 mt-0.5">Full English interface with LTR layout and technical automotive standards</p>
               </div>
               {language === 'en' && <CheckCircle2 className="h-5 w-5 text-purple-400" />}
+            </div>
+          </div>
+        </div>
+
+        {/* Section 4: Theme & Appearance Preferences */}
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4 shadow-lg md:col-span-2">
+          <h3 className="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-2">
+            <Sun className="h-4 w-4" />
+            <span>{language === 'ar' ? 'المظهر وتفضيلات الإضاءة (Daylight / Dark Mode)' : 'Theme & Lighting Preferences'}</span>
+          </h3>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div
+              onClick={() => setTheme('dark')}
+              className={`p-4 rounded-xl border cursor-pointer transition-all flex items-center justify-between ${
+                theme === 'dark'
+                  ? 'bg-slate-800 border-amber-500 text-white shadow-md'
+                  : 'bg-slate-800/40 border-slate-700/60 text-slate-400 hover:border-slate-600'
+              }`}
+            >
+              <div className="flex items-center gap-3">
+                <div className="p-2 rounded-lg bg-slate-900 text-amber-400 border border-slate-700">
+                  <Moon className="h-5 w-5" />
+                </div>
+                <div>
+                  <h4 className="font-bold text-sm text-white">{language === 'ar' ? 'الوضع الليلي (Dark Mode)' : 'Dark Mode (Night)'}</h4>
+                  <p className="text-xs text-slate-400 mt-0.5">{language === 'ar' ? 'مريح للعين ومناسب للورش المظلمة والقيادة الليلية' : 'Optimized for night driving and dim workshops'}</p>
+                </div>
+              </div>
+              {theme === 'dark' && <CheckCircle2 className="h-5 w-5 text-amber-400" />}
+            </div>
+
+            <div
+              onClick={() => setTheme('daylight')}
+              className={`p-4 rounded-xl border cursor-pointer transition-all flex items-center justify-between ${
+                theme === 'daylight'
+                  ? 'bg-amber-50 border-amber-500 text-slate-900 shadow-md'
+                  : 'bg-slate-800/40 border-slate-700/60 text-slate-400 hover:border-slate-600'
+              }`}
+            >
+              <div className="flex items-center gap-3">
+                <div className="p-2 rounded-lg bg-amber-100 text-amber-700 border border-amber-300">
+                  <Sun className="h-5 w-5" />
+                </div>
+                <div>
+                  <h4 className={`font-bold text-sm ${theme === 'daylight' ? 'text-slate-900' : 'text-white'}`}>
+                    {language === 'ar' ? 'وضع النهار عالي التباين (Daylight Mode)' : 'Daylight High-Contrast Mode'}
+                  </h4>
+                  <p className={`text-xs mt-0.5 ${theme === 'daylight' ? 'text-slate-700' : 'text-slate-400'}`}>
+                    {language === 'ar' ? 'وضوح فائق تحت أشعة الشمس المباشرة في الورش الخارجية' : 'Ultra-high contrast for direct outdoor sunlight'}
+                  </p>
+                </div>
+              </div>
+              {theme === 'daylight' && <CheckCircle2 className="h-5 w-5 text-amber-600" />}
             </div>
           </div>
         </div>

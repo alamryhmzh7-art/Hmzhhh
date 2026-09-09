@@ -118,6 +118,8 @@ export interface ObdPid {
   category: 'engine' | 'fuel' | 'air' | 'electrical' | 'temperature' | 'speed';
   history: { timestamp: number; value: number }[];
   decode: (bytes: number[]) => number;
+  status?: 'SUPPORTED' | 'NOT_SUPPORTED' | 'UNKNOWN';
+  retryCount?: number;
 }
 
 export type DtcStatus = 'CONFIRMED' | 'PENDING' | 'PERMANENT';

@@ -51,7 +51,7 @@ export const AndroidProjectView: React.FC = () => {
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            Production-Grade Android Architecture (MVVM + Clean Architecture + Coroutines + Material 3)
+            {t('androidCodeSubtitle')}
           </p>
         </div>
 
@@ -61,7 +61,7 @@ export const AndroidProjectView: React.FC = () => {
             className="px-4 py-2 rounded-lg text-xs font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 flex items-center gap-1.5 transition-colors"
           >
             {copied ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
-            <span>{copied ? 'Copied' : 'Copy File'}</span>
+            <span>{copied ? t('copied') : t('copyFile')}</span>
           </button>
 
           <button
@@ -69,7 +69,7 @@ export const AndroidProjectView: React.FC = () => {
             className="px-4 py-2 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white flex items-center gap-2 transition-all shadow-md shadow-emerald-950/50"
           >
             <Download className="h-4 w-4" />
-            <span>Download Source</span>
+            <span>{t('downloadSource')}</span>
           </button>
         </div>
       </div>
@@ -78,20 +78,20 @@ export const AndroidProjectView: React.FC = () => {
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg space-y-3">
         <h3 className="text-xs font-bold text-cyan-400 uppercase tracking-wider flex items-center gap-2">
           <Terminal className="h-4 w-4" />
-          <span>How to Compile and Build the Android APK</span>
+          <span>{t('compileBuildTitle')}</span>
         </h3>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs text-slate-300">
           <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 space-y-1">
-            <span className="font-bold text-emerald-400 block">1. Open in Android Studio</span>
-            <p className="text-[11px] text-slate-400">Clone/copy the manifest files into Android Studio Hedgehog / Iguana / Jellyfish with JDK 17.</p>
+            <span className="font-bold text-emerald-400 block">{isRtl ? '1. الفتح ببرنامج Android Studio' : '1. Open in Android Studio'}</span>
+            <p className="text-[11px] text-slate-400">{isRtl ? 'افتح المشروع في برنامج Android Studio باستخدام JDK 17.' : 'Clone/copy the manifest files into Android Studio Hedgehog / Iguana / Jellyfish with JDK 17.'}</p>
           </div>
           <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 space-y-1">
-            <span className="font-bold text-cyan-400 block">2. Sync Gradle Dependencies</span>
-            <p className="text-[11px] text-slate-400">Run <code className="text-white font-mono">./gradlew build</code> to download Kotlin Compose BOM and Coroutines.</p>
+            <span className="font-bold text-cyan-400 block">{isRtl ? '2. مزامنة ملفات Gradle' : '2. Sync Gradle Dependencies'}</span>
+            <p className="text-[11px] text-slate-400">{isRtl ? 'نفّذ الأمر ./gradlew build لتنزيل المكتبات وحزم حزم Kotlin.' : 'Run ./gradlew build to download Kotlin Compose BOM and Coroutines.'}</p>
           </div>
           <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 space-y-1">
-            <span className="font-bold text-purple-400 block">3. Generate Signed APK</span>
-            <p className="text-[11px] text-slate-400">Run <code className="text-white font-mono">./gradlew assembleRelease</code> to output <code className="text-white font-mono">app-release.apk</code>.</p>
+            <span className="font-bold text-purple-400 block">{isRtl ? '3. إنتاج تطبيق APK الموقّع' : '3. Generate Signed APK'}</span>
+            <p className="text-[11px] text-slate-400">{isRtl ? 'نفّذ الأمر ./gradlew assembleRelease لاستخراج حزمة app-release.apk.' : 'Run ./gradlew assembleRelease to output app-release.apk.'}</p>
           </div>
         </div>
       </div>
@@ -101,7 +101,7 @@ export const AndroidProjectView: React.FC = () => {
         {/* Left Column: File Tree */}
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-2">
           <span className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-3">
-            Native Android Source Tree
+            {t('nativeAndroidTree')}
           </span>
           <div className="space-y-1.5">
             {ANDROID_PROJECT_FILES.map((file) => {

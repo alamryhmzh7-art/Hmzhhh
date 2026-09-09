@@ -110,7 +110,7 @@ export const UdsView: React.FC<UdsViewProps> = ({ status }) => {
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            Unified Diagnostic Services Command Builder & Negative Response Code (NRC) Decoder
+            {isRtl ? 'منشئ أوامر تشخيص UDS ومفكك شفرات الاستجابات السلبية NRC لبروتوكول ISO 14229' : 'Unified Diagnostic Services Command Builder & Negative Response Code (NRC) Decoder'}
           </p>
         </div>
       </div>
