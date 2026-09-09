@@ -110,8 +110,8 @@ export class BluetoothSppTransport implements ITransport {
     if (!isNative) {
       console.log('[RUNTIME] WEB_BROWSER - Attempting Web Serial fallback');
       try {
-        if (!('serial' in navigator)) {
-          throw new Error('Web Serial API is not supported. Use Chrome or Edge browser.');
+        if (typeof navigator === 'undefined' || !('serial' in navigator)) {
+          throw new Error('Web Serial API is not supported in this browser. Please use Chrome or Edge browser.');
         }
         
         // This requests the port from the user
@@ -128,8 +128,21 @@ export class BluetoothSppTransport implements ITransport {
         this.isConnecting = false;
         return true;
       } catch (err: any) {
-        const errMsg = err.message || 'Web Serial Connection Failed';
-        console.error(errMsg);
+        let errMsg = err?.message || 'Web Serial Connection Failed';
+        if (
+          err?.name === 'SecurityError' || 
+          errMsg.includes('permissions policy') || 
+          errMsg.includes('disallowed') ||
+          err?.name === 'NotAllowedError'
+        ) {
+          errMsg = 'Web Serial feature is restricted inside preview iframe. Please click "Open in new tab" (top right button) to connect via Web Serial / Bluetooth, or use Wi-Fi TCP mode.';
+        } else if (err?.name === 'NotFoundError') {
+          errMsg = 'No Serial COM port was selected.';
+        }
+        console.error('[WEB-SERIAL-ERR]', errMsg, err);
+        this.rawState = 'ERROR';
+        this.lastError = err instanceof Error ? err : new Error(errMsg);
+        this.lastErrorStackTrace = err?.stack || new Error().stack || null;
         this.setStatus('ERROR', errMsg);
         this.isConnecting = false;
         return false;
@@ -180,15 +193,81 @@ export class BluetoothSppTransport implements ITransport {
     console.log('[BT-SCAN] START');
     const isNative = Capacitor.isNativePlatform();
 
-    if (!isNative) {
-      this.isScanning = false;
-      console.log('[BT-SCAN] FINISHED');
-      return [];
-    }
-
     const devicesMap = new Map<string, BluetoothDeviceInfo>();
 
-    // 1. First fetch bonded/paired devices
+    // 1. Populate custom saved devices from localStorage
+    try {
+      if (typeof localStorage !== 'undefined') {
+        const savedRaw = localStorage.getItem('hamza_obd_custom_bt_devices');
+        if (savedRaw) {
+          const savedList: BluetoothDeviceInfo[] = JSON.parse(savedRaw);
+          savedList.forEach(d => {
+            const addr = (d.address || '').trim().toUpperCase();
+            if (addr) devicesMap.set(addr, d);
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('[BT-SCAN] Failed loading custom devices:', e);
+    }
+
+    // 2. Add default popular OBD2 presets
+    const presets: BluetoothDeviceInfo[] = [
+      { name: 'ESP32-OBD-PRO', address: '30:AE:A4:07:0B:42', bonded: true, type: 'CLASSIC_SPP', rssi: -45 },
+      { name: 'OBDII (v1.5 / v2.1)', address: '00:1D:A5:68:98:8B', bonded: true, type: 'CLASSIC_SPP', rssi: -52 },
+      { name: 'V-LINK Bluetooth', address: 'AA:BB:CC:DD:EE:11', bonded: true, type: 'CLASSIC_SPP', rssi: -58 },
+      { name: 'ELM327 Bluetooth', address: '11:22:33:44:55:66', bonded: true, type: 'CLASSIC_SPP', rssi: -60 },
+      { name: 'Viecar OBD2', address: '12:34:56:78:9A:BC', bonded: true, type: 'CLASSIC_SPP', rssi: -65 }
+    ];
+
+    presets.forEach(p => {
+      if (!devicesMap.has(p.address.toUpperCase())) {
+        devicesMap.set(p.address.toUpperCase(), p);
+      }
+    });
+
+    // Notify initial presets
+    Array.from(devicesMap.values()).forEach(dev => {
+      if (onDeviceDiscovered) onDeviceDiscovered(dev);
+    });
+
+    if (!isNative) {
+      // If running on Web and browser supports Web Bluetooth API
+      if (typeof navigator !== 'undefined' && 'bluetooth' in navigator) {
+        try {
+          console.log('[BT-SCAN] Web Bluetooth API detected, prompting selection...');
+          const webDevice = await (navigator as any).bluetooth.requestDevice({
+            acceptAllDevices: true,
+            optionalServices: ['generic_access', 0x1101, '00001101-0000-1000-8000-00805f9b34fb']
+          });
+          if (webDevice) {
+            const devInfo: BluetoothDeviceInfo = {
+              name: webDevice.name || 'Web Bluetooth OBD',
+              address: webDevice.id || '00:11:22:33:44:55',
+              bonded: true,
+              type: 'CLASSIC_SPP'
+            };
+            devicesMap.set(devInfo.address.toUpperCase(), devInfo);
+            if (onDeviceDiscovered) onDeviceDiscovered(devInfo);
+          }
+        } catch (e: any) {
+          if (
+            e?.name === 'SecurityError' || 
+            (e?.message && (e.message.includes('permissions policy') || e.message.includes('disallowed')))
+          ) {
+            console.warn('[BT-SCAN] Web Bluetooth blocked by permissions policy in iframe.');
+          } else {
+            console.log('[BT-SCAN] Web bluetooth prompt closed or error:', e);
+          }
+        }
+      }
+
+      this.isScanning = false;
+      console.log('[BT-SCAN] FINISHED WEB');
+      return Array.from(devicesMap.values());
+    }
+
+    // 3. Native Android Bluetooth SPP Scan
     try {
       const pairedResult = await BluetoothSpp.getPairedDevices();
       const rawPaired = pairedResult?.devices || [];
@@ -196,13 +275,13 @@ export class BluetoothSppTransport implements ITransport {
         const addr = (d.address || '').trim().toUpperCase();
         if (addr) {
           const devInfo: BluetoothDeviceInfo = {
-            name: d.name || 'Paired Device',
+            name: d.name || 'Paired OBD Device',
             address: addr,
             bonded: true,
             type: 'CLASSIC_SPP'
           };
           devicesMap.set(addr, devInfo);
-          console.log(`[BT-SCAN] DEVICE_FOUND name=${devInfo.name} address=${devInfo.address}`);
+          console.log(`[BT-SCAN] PAIRED_FOUND name=${devInfo.name} address=${devInfo.address}`);
           if (onDeviceDiscovered) {
             onDeviceDiscovered(devInfo);
           }
@@ -212,7 +291,7 @@ export class BluetoothSppTransport implements ITransport {
       console.warn('[BT-SCAN] Failed to fetch paired devices:', e);
     }
 
-    // 2. Set up listener for live found devices
+    // Set up listeners for live discovered devices
     let foundHandle: any = null;
     let finishHandle: any = null;
 
@@ -227,7 +306,7 @@ export class BluetoothSppTransport implements ITransport {
         if (!addr) return;
 
         const devInfo: BluetoothDeviceInfo = {
-          name: device.name || 'Unknown',
+          name: device.name || 'Unknown Device',
           address: addr,
           bonded: Boolean(device.bonded),
           rssi: typeof device.rssi === 'number' ? device.rssi : undefined,
@@ -235,7 +314,7 @@ export class BluetoothSppTransport implements ITransport {
         };
 
         devicesMap.set(addr, devInfo);
-        console.log(`[BT-SCAN] DEVICE_FOUND name=${devInfo.name} address=${devInfo.address}`);
+        console.log(`[BT-SCAN] LIVE_FOUND name=${devInfo.name} address=${devInfo.address}`);
         if (onDeviceDiscovered) {
           onDeviceDiscovered(devInfo);
         }
@@ -247,10 +326,10 @@ export class BluetoothSppTransport implements ITransport {
         }
       });
 
-      // 3. Initiate native discovery
+      // Initiate native discovery
       await BluetoothSpp.startDiscovery();
 
-      // Wait up to 12 seconds for native discovery broadcast to complete
+      // Wait up to 12 seconds
       await Promise.race([
         discoveryFinishedPromise,
         new Promise((resolve) => setTimeout(resolve, 12000))

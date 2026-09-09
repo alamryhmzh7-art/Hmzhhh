@@ -36,13 +36,46 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
   const [canBusStatus, setCanBusStatus] = useState<CanBusStatus | null>(null);
   const [isTestingCan, setIsTestingCan] = useState<boolean>(false);
 
+  const loadInitialDevices = () => {
+    const presets: BluetoothDeviceInfo[] = [
+      { name: 'ESP32-OBD-PRO', address: '30:AE:A4:07:0B:42', bonded: true, type: 'CLASSIC_SPP', rssi: -45 },
+      { name: 'OBDII (v1.5 / v2.1)', address: '00:1D:A5:68:98:8B', bonded: true, type: 'CLASSIC_SPP', rssi: -52 },
+      { name: 'V-LINK Bluetooth', address: 'AA:BB:CC:DD:EE:11', bonded: true, type: 'CLASSIC_SPP', rssi: -58 },
+      { name: 'ELM327 Bluetooth', address: '11:22:33:44:55:66', bonded: true, type: 'CLASSIC_SPP', rssi: -60 },
+      { name: 'Viecar OBD2', address: '12:34:56:78:9A:BC', bonded: true, type: 'CLASSIC_SPP', rssi: -65 }
+    ];
+
+    let savedList: BluetoothDeviceInfo[] = [];
+    try {
+      const savedRaw = localStorage.getItem('hamza_obd_custom_bt_devices');
+      if (savedRaw) savedList = JSON.parse(savedRaw);
+    } catch (e) {}
+
+    const listMap = new Map<string, BluetoothDeviceInfo>();
+    [...savedList, ...presets].forEach(d => {
+      if (d.address) listMap.set(d.address.toUpperCase(), d);
+    });
+
+    if (config.bluetoothDeviceName && config.bluetoothMacAddress) {
+      listMap.set(config.bluetoothMacAddress.toUpperCase(), {
+        name: config.bluetoothDeviceName,
+        address: config.bluetoothMacAddress,
+        bonded: true,
+        type: 'CLASSIC_SPP'
+      });
+    }
+
+    setDiscoveredDevices(Array.from(listMap.values()));
+  };
+
   useEffect(() => {
     if (isOpen) {
       setSelectedTransport(config.transportType || 'WIFI_TCP');
       setIp(config.ip || '192.168.4.1');
       setPort(config.port || 35000);
-      setBtDeviceName(config.bluetoothDeviceName || '');
-      setBtMac(config.bluetoothMacAddress || '');
+      setBtDeviceName(config.bluetoothDeviceName || 'ESP32-OBD-PRO');
+      setBtMac(config.bluetoothMacAddress || '30:AE:A4:07:0B:42');
+      loadInitialDevices();
     }
   }, [isOpen]);
 
@@ -53,11 +86,11 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
     try {
       const savedRaw = localStorage.getItem('hamza_obd_custom_bt_devices');
       const savedList: BluetoothDeviceInfo[] = savedRaw ? JSON.parse(savedRaw) : [];
-      if (!savedList.some(d => d.address === address)) {
+      if (!savedList.some(d => d.address.toUpperCase() === address.toUpperCase())) {
         savedList.push({
           name,
           address,
-          bonded: false,
+          bonded: true,
           rssi: -50,
           type: 'CLASSIC_SPP'
         });
@@ -70,7 +103,6 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
 
   const handleScanBtDevices = async () => {
     setIsScanningBt(true);
-    setDiscoveredDevices([]);
     try {
       if (btDeviceName && btMac) {
         saveCustomDevice(btDeviceName, btMac);
@@ -86,7 +118,14 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
           return [...prev, newDev];
         });
       });
-      setDiscoveredDevices(devices);
+      if (devices && devices.length > 0) {
+        setDiscoveredDevices(prev => {
+          const map = new Map<string, BluetoothDeviceInfo>();
+          prev.forEach(d => map.set(d.address.toUpperCase(), d));
+          devices.forEach(d => map.set(d.address.toUpperCase(), d));
+          return Array.from(map.values());
+        });
+      }
     } catch (err) {
       console.warn('[BT-SCAN] Error:', err);
     } finally {
@@ -188,53 +227,72 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
         <div className="p-6 overflow-y-auto space-y-6 flex-1 custom-scrollbar">
           
           {/* 1. Live Connection Status Banner */}
-          <div className={`p-4 rounded-xl border flex items-center justify-between ${
-            status === 'CONNECTED'
-              ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-300'
-              : status === 'CONNECTING'
-              ? 'bg-amber-950/30 border-amber-500/40 text-amber-300'
-              : status === 'ERROR'
-              ? 'bg-rose-950/30 border-rose-500/40 text-rose-300'
-              : 'bg-slate-800/60 border-slate-700 text-slate-300'
-          }`}>
-            <div className="flex items-center gap-3">
-              <span className={`w-3 h-3 rounded-full ${
-                status === 'CONNECTED' ? 'bg-emerald-400 animate-ping' :
-                status === 'CONNECTING' ? 'bg-amber-400 animate-pulse' :
-                status === 'ERROR' ? 'bg-rose-400' : 'bg-slate-500'
-              }`} />
-              <div>
-                <div className="text-xs text-slate-400 uppercase tracking-wider font-semibold">
-                  {isRtl ? 'حالة الاتصال الحالية' : 'Current Connection Status'}
+          <div className="space-y-2">
+            <div className={`p-4 rounded-xl border flex items-center justify-between ${
+              status === 'CONNECTED'
+                ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-300'
+                : status === 'CONNECTING'
+                ? 'bg-amber-950/30 border-amber-500/40 text-amber-300'
+                : status === 'ERROR'
+                ? 'bg-rose-950/30 border-rose-500/40 text-rose-300'
+                : 'bg-slate-800/60 border-slate-700 text-slate-300'
+            }`}>
+              <div className="flex items-center gap-3">
+                <span className={`w-3 h-3 rounded-full ${
+                  status === 'CONNECTED' ? 'bg-emerald-400 animate-ping' :
+                  status === 'CONNECTING' ? 'bg-amber-400 animate-pulse' :
+                  status === 'ERROR' ? 'bg-rose-400' : 'bg-slate-500'
+                }`} />
+                <div>
+                  <div className="text-xs text-slate-400 uppercase tracking-wider font-semibold">
+                    {isRtl ? 'حالة الاتصال الحالية' : 'Current Connection Status'}
+                  </div>
+                  <div className="text-base font-bold flex items-center gap-2">
+                    {status}
+                    <span className="text-xs px-2 py-0.5 rounded bg-slate-900/80 font-mono text-cyan-400 border border-slate-700">
+                      {selectedTransport === 'BLUETOOTH_SPP' ? 'Bluetooth SPP' : 'Wi-Fi TCP'}
+                    </span>
+                  </div>
                 </div>
-                <div className="text-base font-bold flex items-center gap-2">
-                  {status}
-                  <span className="text-xs px-2 py-0.5 rounded bg-slate-900/80 font-mono text-cyan-400 border border-slate-700">
-                    {selectedTransport === 'BLUETOOTH_SPP' ? 'Bluetooth SPP' : 'Wi-Fi TCP'}
-                  </span>
-                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                {status === 'CONNECTED' ? (
+                  <button
+                    onClick={handleDisconnect}
+                    className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold transition-all shadow-lg"
+                  >
+                    {t('btnDisconnect')}
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleConnect}
+                    disabled={isConnecting}
+                    className="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold transition-all shadow-lg flex items-center gap-1.5"
+                  >
+                    {isConnecting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
+                    {t('btnConnect')}
+                  </button>
+                )}
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
-              {status === 'CONNECTED' ? (
-                <button
-                  onClick={handleDisconnect}
-                  className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold transition-all shadow-lg"
-                >
-                  {t('btnDisconnect')}
-                </button>
-              ) : (
-                <button
-                  onClick={handleConnect}
-                  disabled={isConnecting}
-                  className="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold transition-all shadow-lg flex items-center gap-1.5"
-                >
-                  {isConnecting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
-                  {t('btnConnect')}
-                </button>
-              )}
-            </div>
+            {/* Error detail banner */}
+            {status === 'ERROR' && (
+              <div className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/40 text-rose-200 text-xs flex items-start gap-2.5">
+                <AlertTriangle className="w-4 h-4 text-rose-400 flex-shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <div className="font-bold mb-0.5">
+                    {isRtl ? 'تفاصيل الخطأ في الاتصال' : 'Connection Error Detail'}
+                  </div>
+                  <p className="text-[11px] text-rose-300 leading-relaxed font-mono">
+                    {transportManager.getTransport().getRawConnectionState().error || (
+                      isRtl ? 'تعذر الاتصال بالجهاز. تأكد من تشغيل القطعة أو فتح التطبيق في تبويب جديد.' : 'Failed to connect. Ensure device is powered or open app in new tab.'
+                    )}
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* 2. Connection Type Selector (Radio Pills) */}
@@ -331,44 +389,21 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
                   {isRtl ? 'أجهزة البلوتوث المكتشفة والمقترنة' : 'Discovered & Paired Bluetooth Devices'}
                 </div>
                 <div className="flex items-center gap-2">
-                  {typeof navigator !== 'undefined' && (navigator as any).bluetooth && (
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        try {
-                          const device = await (navigator as any).bluetooth.requestDevice({
-                            acceptAllDevices: true,
-                            optionalServices: ['00001101-0000-1000-8000-00805f9b34fb']
-                          });
-                          if (device) {
-                            const newDev: BluetoothDeviceInfo = {
-                              name: device.name || 'Web Bluetooth Device',
-                              address: device.id || 'Web-Device-ID',
-                              bonded: true,
-                              rssi: -50,
-                              type: 'CLASSIC_SPP'
-                            };
-                            setDiscoveredDevices(prev => {
-                              const exists = prev.some(d => d.address === newDev.address);
-                              return exists ? prev : [newDev, ...prev];
-                            });
-                            setBtDeviceName(newDev.name);
-                            setBtMac(newDev.address);
-                            onUpdateConfig({ bluetoothDeviceName: newDev.name, bluetoothMacAddress: newDev.address });
-                          }
-                        } catch (err) {
-                          console.warn('Web Bluetooth selection cancelled/failed:', err);
-                          if ((err as any)?.message?.includes('permissions policy')) {
-                            alert("Bluetooth access is restricted in this embedded preview frame. Please click the 'Open in New Tab' icon (top right) to scan for real Bluetooth devices.");
-                          }
-                        }
-                      }}
-                      className="px-2.5 py-1 rounded-lg bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 border border-indigo-500/40 text-xs font-semibold flex items-center gap-1.5 transition-all"
-                    >
-                      <Radio className="w-3.5 h-3.5 animate-pulse" />
-                      WEB BT
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (typeof navigator === 'undefined' || !('serial' in navigator)) {
+                        alert(isRtl ? "متصفحك لا يدعم Web Serial API. استخدم Chrome أو Edge على الكمبيوتر." : "Your browser doesn't support Web Serial API. Use Chrome or Edge on Desktop.");
+                        return;
+                      }
+                      alert(isRtl ? "للاتصال عبر الويب، الرجاء اختيار منفذ 'COM' الخاص بقطعة البلوتوث (OBD2) المقترنة مسبقاً بجهازك من النافذة التالية." : "To connect on the web, please select the 'COM' port of your paired Bluetooth OBD2 device from the next popup.");
+                      handleConnect();
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 border border-indigo-500/40 text-xs font-semibold flex items-center gap-1.5 transition-all"
+                  >
+                    <Radio className="w-3.5 h-3.5 animate-pulse" />
+                    {isRtl ? 'اتصال الويب (Web Serial)' : 'WEB SERIAL'}
+                  </button>
                   <button
                     type="button"
                     onClick={handleScanBtDevices}
