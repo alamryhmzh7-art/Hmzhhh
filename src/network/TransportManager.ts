@@ -106,9 +106,6 @@ export class TransportManager {
 
       const frameIdNum = parseInt(frame.id.replace('0x', ''), 16);
       
-      // Log EVERY incoming CAN frame at the transport manager level
-      console.log(`[TM-CAN-RX] CAN=0x${frameIdNum.toString(16).toUpperCase()} EXT=${frame.isExtended} DLC=${frame.dlc} DATA=[${frame.dataHex}]`);
-      
       for (const seqNumStr in this.pendingRequests) {
         const seq = parseInt(seqNumStr);
         const req = this.pendingRequests[seq];

@@ -56,9 +56,9 @@ export const CanMonitorView: React.FC<CanMonitorViewProps> = ({ status }) => {
   };
 
   useEffect(() => {
-    const unsubscribe = canManager.subscribe((frame) => {
+    const unsubscribe = canManager.subscribe((newFrames) => {
       if (!isPaused) {
-        setFrames((prev) => [...prev.slice(-300), frame]);
+        setFrames((prev) => [...prev.slice(-150), ...newFrames]);
       }
     });
 

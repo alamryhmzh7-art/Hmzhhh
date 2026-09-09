@@ -2,12 +2,14 @@ import { CanFrame, CanSpeed, CanIdType } from '../types';
 
 export class CanManager {
   private frames: CanFrame[] = [];
-  private maxStoredFrames = 500;
-  private listeners: ((frame: CanFrame) => void)[] = [];
+  private maxStoredFrames = 150;
+  private listeners: ((frames: CanFrame[]) => void)[] = [];
+  private pendingBatch: CanFrame[] = [];
+  private throttleTimer: any = null;
   private filterId: string = '';
   private isPaused: boolean = false;
 
-  public subscribe(listener: (frame: CanFrame) => void) {
+  public subscribe(listener: (frames: CanFrame[]) => void) {
     this.listeners.push(listener);
     return () => {
       this.listeners = this.listeners.filter(l => l !== listener);
@@ -41,13 +43,24 @@ export class CanManager {
     }
     
     if (!this.isPaused) {
-      this.listeners.forEach(l => l(fullFrame));
+      this.pendingBatch.push(fullFrame);
+      if (!this.throttleTimer) {
+        this.throttleTimer = setTimeout(() => {
+          const batch = [...this.pendingBatch];
+          this.pendingBatch = [];
+          this.throttleTimer = null;
+          if (batch.length > 0) {
+            this.listeners.forEach(l => l(batch));
+          }
+        }, 100); // Batch and throttle UI updates to 10fps max
+      }
     }
     return fullFrame;
   }
 
   public clear() {
     this.frames = [];
+    this.pendingBatch = [];
   }
 
   public clearFrames() {
