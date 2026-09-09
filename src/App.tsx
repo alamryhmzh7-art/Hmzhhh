@@ -8,6 +8,7 @@ import { Header } from './components/Header';
 import { ConnectionManagerModal } from './components/ConnectionManagerModal';
 import { Dashboard } from './components/Dashboard';
 import { LiveDataView } from './components/LiveDataView';
+import { LiveDashboard } from './components/LiveDashboard';
 import { DtcView } from './components/DtcView';
 import { VinView } from './components/VinView';
 import { EcuScanView } from './components/EcuScanView';
@@ -27,6 +28,7 @@ import { DiagnosticAuditView } from './components/DiagnosticAuditView';
 import { 
   Gauge, 
   Activity, 
+  GaugeCircle,
   AlertTriangle, 
   FileSearch, 
   Layers, 
@@ -214,6 +216,7 @@ const MainApp: React.FC = () => {
   const navTabs = [
     { id: 'dashboard', label: t('tabDashboard'), icon: Gauge },
     { id: 'liveData', label: t('tabLiveData'), icon: Activity },
+    { id: 'liveDashboard', label: isRtl ? 'لوحة القيادة الحية' : 'Live Dashboard', icon: GaugeCircle },
     { id: 'dtc', label: t('tabDtc'), icon: AlertTriangle, badge: (dtcList || []).length },
     { id: 'vin', label: t('tabVin'), icon: FileSearch },
     { id: 'ecuScan', label: t('tabEcuScan'), icon: Layers },
@@ -306,6 +309,10 @@ const MainApp: React.FC = () => {
 
         {activeTab === 'liveData' && (
           <LiveDataView status={status} isMockMode={config.isMockMode} />
+        )}
+
+        {activeTab === 'liveDashboard' && (
+          <LiveDashboard status={status} isMockMode={config.isMockMode} />
         )}
 
         {activeTab === 'dtc' && (

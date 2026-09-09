@@ -69,6 +69,7 @@ export type UnitsSystem = 'metric' | 'imperial';
 export type ViewTab = 
   | 'dashboard'
   | 'liveData'
+  | 'liveDashboard'
   | 'dtc'
   | 'vin'
   | 'ecuScan'
