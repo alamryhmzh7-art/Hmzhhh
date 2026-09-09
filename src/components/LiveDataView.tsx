@@ -401,48 +401,6 @@ export const LiveDataView: React.FC<LiveDataViewProps> = ({ status }) => {
         </div>
       </div>
 
-      {/* Simulator Test Controls (Bench Test Sliders) */}
-      {isMockMode && (
-        <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-4">
-          <div className="flex items-center gap-2 text-xs font-bold text-slate-300 mb-3">
-            <Sliders className="h-4 w-4 text-cyan-400" />
-            <span>{isRtl ? 'أدوات التحكم في محاكي بيانات كمبيوتر السيارة (طاولة الفحص)' : 'Interactive ECU Telemetry Simulator Controls (Workbench)'}</span>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <div className="flex justify-between text-xs text-slate-400 mb-1">
-                <span>{isRtl ? `دوران المحرك المستهدف (${simRpm} RPM)` : `Target RPM (${simRpm} RPM)`}</span>
-                <span>Max: 8000</span>
-              </div>
-              <input
-                type="range"
-                min="600"
-                max="7500"
-                step="100"
-                value={simRpm}
-                onChange={(e) => setSimRpm(Number(e.target.value))}
-                className="w-full accent-cyan-400 bg-slate-800 rounded-lg cursor-pointer"
-              />
-            </div>
-            <div>
-              <div className="flex justify-between text-xs text-slate-400 mb-1">
-                <span>{isRtl ? `السرعة المستهدفة (${simSpeed} كم/س)` : `Target Speed (${simSpeed} km/h)`}</span>
-                <span>Max: 240</span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="240"
-                step="5"
-                value={simSpeed}
-                onChange={(e) => setSimSpeed(Number(e.target.value))}
-                className="w-full accent-emerald-400 bg-slate-800 rounded-lg cursor-pointer"
-              />
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* All Monitored PIDs Grid */}
       <div>
         <h3 className="text-sm font-bold text-slate-300 uppercase tracking-wider mb-3">
