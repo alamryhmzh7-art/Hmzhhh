@@ -26,6 +26,7 @@ import { AndroidProjectView } from './components/AndroidProjectView';
 import { UnitTestsView } from './components/UnitTestsView';
 import { SettingsView } from './components/SettingsView';
 import { DiagnosticAuditView } from './components/DiagnosticAuditView';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { 
   Gauge, 
   Activity, 
@@ -294,108 +295,110 @@ const MainApp: React.FC = () => {
 
       {/* Main View Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6">
-        {activeTab === 'dashboard' && (
-          <Dashboard
-            status={status}
-            config={config}
-            isCarLinked={ecuLinkStatus === 'LINKED'}
-            vinInfo={vinInfo}
-            dtcList={dtcList}
-            ecuList={ecuList}
-            batteryVoltage={batteryVoltage}
-            onNavigate={(tab) => setActiveTab(tab as ViewTab)}
-            onQuickScan={() => setActiveTab('ecuScan')}
-          />
-        )}
+        <ErrorBoundary key={activeTab} onReset={() => setActiveTab('dashboard')}>
+          {activeTab === 'dashboard' && (
+            <Dashboard
+              status={status}
+              config={config}
+              isCarLinked={ecuLinkStatus === 'LINKED'}
+              vinInfo={vinInfo}
+              dtcList={dtcList}
+              ecuList={ecuList}
+              batteryVoltage={batteryVoltage}
+              onNavigate={(tab) => setActiveTab(tab as ViewTab)}
+              onQuickScan={() => setActiveTab('ecuScan')}
+            />
+          )}
 
-        {activeTab === 'liveData' && (
-          <LiveDataView status={status} isMockMode={config.isMockMode} />
-        )}
+          {activeTab === 'liveData' && (
+            <LiveDataView status={status} isMockMode={config.isMockMode} />
+          )}
 
-        {activeTab === 'liveDashboard' && (
-          <LiveDashboard status={status} isMockMode={config.isMockMode} />
-        )}
+          {activeTab === 'liveDashboard' && (
+            <LiveDashboard status={status} isMockMode={config.isMockMode} />
+          )}
 
-        {activeTab === 'dtc' && (
-          <DtcView
-            status={status}
-            dtcList={dtcList}
-            setDtcList={setDtcList}
-            isMockMode={config.isMockMode}
-            vinInfo={vinInfo}
-            batteryVoltage={batteryVoltage}
-          />
-        )}
+          {activeTab === 'dtc' && (
+            <DtcView
+              status={status}
+              dtcList={dtcList}
+              setDtcList={setDtcList}
+              isMockMode={config.isMockMode}
+              vinInfo={vinInfo}
+              batteryVoltage={batteryVoltage}
+            />
+          )}
 
-        {activeTab === 'vin' && (
-          <VinView
-            status={status}
-            vinInfo={vinInfo}
-            setVinInfo={setVinInfo}
-            isMockMode={config.isMockMode}
-          />
-        )}
+          {activeTab === 'vin' && (
+            <VinView
+              status={status}
+              vinInfo={vinInfo}
+              setVinInfo={setVinInfo}
+              isMockMode={config.isMockMode}
+            />
+          )}
 
-        {activeTab === 'ecuScan' && (
-          <EcuScanView
-            status={status}
-            ecuList={ecuList}
-            setEcuList={setEcuList}
-            isMockMode={config.isMockMode}
-          />
-        )}
+          {activeTab === 'ecuScan' && (
+            <EcuScanView
+              status={status}
+              ecuList={ecuList}
+              setEcuList={setEcuList}
+              isMockMode={config.isMockMode}
+            />
+          )}
 
-        {activeTab === 'canMonitor' && (
-          <CanMonitorView status={status} />
-        )}
+          {activeTab === 'canMonitor' && (
+            <CanMonitorView status={status} />
+          )}
 
-        {activeTab === 'uds' && (
-          <UdsView status={status} />
-        )}
+          {activeTab === 'uds' && (
+            <UdsView status={status} />
+          )}
 
-        {activeTab === 'serviceFunctions' && (
-          <ServiceFunctionsView status={status} batteryVoltage={batteryVoltage} />
-        )}
+          {activeTab === 'serviceFunctions' && (
+            <ServiceFunctionsView status={status} batteryVoltage={batteryVoltage} />
+          )}
 
-        {activeTab === 'toyota' && (
-          <ToyotaSpecialView status={status} batteryVoltage={batteryVoltage} />
-        )}
+          {activeTab === 'toyota' && (
+            <ToyotaSpecialView status={status} batteryVoltage={batteryVoltage} />
+          )}
 
-        {activeTab === 'reports' && (
-          <ReportsView status={status} vinInfo={vinInfo} dtcList={dtcList} />
-        )}
+          {activeTab === 'reports' && (
+            <ReportsView status={status} vinInfo={vinInfo} dtcList={dtcList} />
+          )}
 
-        {activeTab === 'commLog' && (
-          <CommLogView status={status} />
-        )}
+          {activeTab === 'commLog' && (
+            <CommLogView status={status} />
+          )}
 
-        {activeTab === 'errorLog' && (
-          <ErrorLogView status={status} />
-        )}
+          {activeTab === 'errorLog' && (
+            <ErrorLogView status={status} />
+          )}
 
-        {activeTab === 'devMode' && (
-          <DeveloperModeView status={status} />
-        )}
+          {activeTab === 'devMode' && (
+            <DeveloperModeView status={status} />
+          )}
 
-        {activeTab === 'ota' && (
-          <OtaView status={status} />
-        )}
+          {activeTab === 'ota' && (
+            <OtaView status={status} />
+          )}
 
-        {activeTab === 'androidCode' && (
-          <AndroidProjectView />
-        )}
+          {activeTab === 'androidCode' && (
+            <AndroidProjectView />
+          )}
 
-        {activeTab === 'unitTests' && (
-          <UnitTestsView />
-        )}
+          {activeTab === 'unitTests' && (
+            <UnitTestsView />
+          )}
 
-        {activeTab === 'audit' && (
-          <DiagnosticAuditView status={status} />
-        )}
+          {activeTab === 'audit' && (
+            <DiagnosticAuditView status={status} />
+          )}
 
-        {activeTab === 'settings' && (
-          <SettingsView config={config} setConfig={setConfig} status={status} />
-        )}
+          {activeTab === 'settings' && (
+            <SettingsView config={config} setConfig={setConfig} status={status} />
+          )}
+        </ErrorBoundary>
       </main>
 
       {/* Bottom Status Bar */}

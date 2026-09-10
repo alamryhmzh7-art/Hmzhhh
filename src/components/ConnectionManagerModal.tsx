@@ -286,7 +286,7 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
                     {isRtl ? 'تفاصيل الخطأ في الاتصال' : 'Connection Error Detail'}
                   </div>
                   <p className="text-[11px] text-rose-300 leading-relaxed font-mono">
-                    {transportManager.getTransport().getRawConnectionState().error || (
+                    {transportManager.getTransport().getRawConnectionState?.()?.error || (
                       isRtl ? 'تعذر الاتصال بالجهاز. تأكد من تشغيل القطعة أو فتح التطبيق في تبويب جديد.' : 'Failed to connect. Ensure device is powered or open app in new tab.'
                     )}
                   </p>

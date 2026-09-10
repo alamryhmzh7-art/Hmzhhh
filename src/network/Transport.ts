@@ -22,6 +22,13 @@ export interface ITransport {
   readonly type: TransportType;
   
   getState(): ConnectionStatus;
+  getRawConnectionState?(): { 
+    state?: ConnectionStatus; 
+    rawState: string; 
+    lastError?: string | null; 
+    error: string | null; 
+    stackTrace?: string | null; 
+  };
   isConnected(): boolean;
   updateConfig(config: ConnectionConfig): void;
   
