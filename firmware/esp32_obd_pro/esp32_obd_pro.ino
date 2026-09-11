@@ -27,6 +27,10 @@
 #define CAN_RX_PIN                GPIO_NUM_21
 #define CAN_DEFAULT_SPEED_KBPS    500
 
+#define KLINE_RX_PIN              GPIO_NUM_16
+#define KLINE_TX_PIN              GPIO_NUM_17
+#define KLINE_BAUDRATE            10400
+
 #define WIFI_AP_SSID              "ESP32-OBD-PRO"
 #define WIFI_AP_PASS              "12345678"
 #define TCP_SERVER_PORT           35000
@@ -37,6 +41,24 @@
 
 uint32_t currentCanSpeedKbps = CAN_DEFAULT_SPEED_KBPS;
 bool enableRawCanLogging = false;
+
+// K-Line Protocol IDs
+#define KLINE_PROTO_AUTO          0x00
+#define KLINE_PROTO_CAN_11_500    0x01
+#define KLINE_PROTO_CAN_29_500    0x02
+#define KLINE_PROTO_CAN_11_250    0x03
+#define KLINE_PROTO_CAN_29_250    0x04
+#define KLINE_PROTO_ISO9141_SLOW  0x05
+#define KLINE_PROTO_KWP2000_FAST  0x06
+#define KLINE_PROTO_KWP2000_SLOW  0x07
+
+// K-Line Status Codes
+#define KLINE_STATUS_SUCCESS            0x00
+#define KLINE_STATUS_NO_VOLTAGE         0x01
+#define KLINE_STATUS_INIT_FAILED        0x02
+#define KLINE_STATUS_KEYBYTE_MISMATCH   0x03
+#define KLINE_STATUS_ECU_NO_RESPONSE    0x04
+#define KLINE_STATUS_CHECKSUM_ERROR     0x05
 
 // Binary Protocol Constants
 #define PROTOCOL_MAGIC_1          0xAA
@@ -51,6 +73,12 @@ bool enableRawCanLogging = false;
 #define CMD_CAN_STATUS_RESP       0x05
 #define CMD_CONFIG_CAN            0x06
 #define CMD_HEARTBEAT             0x07
+#define CMD_CONFIG_PROTOCOL       0x08
+#define CMD_KLINE_INIT            0x09
+#define CMD_KLINE_INIT_RESP       0x0A
+#define CMD_KLINE_FRAME           0x0B
+#define CMD_KLINE_STATUS_REQ      0x0C
+#define CMD_KLINE_STATUS_RESP     0x0D
 
 // ----------------------------------------------------------------------------
 // Global Instances & Buffers
@@ -75,6 +103,17 @@ struct SystemStats {
   bool wifiClientConnected;
 } stats = {0, 0, 0, 0, 0, false, false, false};
 
+// K-Line Physical Layer State Machine
+struct KlineState {
+  bool initialized;
+  uint8_t activeProtocol; // 0x05 = 9141, 0x06 = KWP Fast, 0x07 = KWP Slow
+  uint8_t keyByte1;
+  uint8_t keyByte2;
+  uint16_t rxErrorCount;
+  uint16_t txErrorCount;
+  uint8_t lastErrorCode;
+} klineState = {false, KLINE_PROTO_ISO9141_SLOW, 0x00, 0x00, 0, 0, KLINE_STATUS_SUCCESS};
+
 // Static Stream Parser Buffer for Transport RX (Protects ESP32 Heap)
 #define RX_STREAM_BUF_SIZE 512
 uint8_t wifiRxBuf[RX_STREAM_BUF_SIZE];
@@ -85,14 +124,353 @@ size_t btRxHead = 0;
 
 // Forward Declarations
 void initCAN(uint32_t speedKbps);
+bool checkKlineVoltage();
+void klineFlushRxEcho(size_t expectedEchoCount);
+uint8_t initKlineIso9141();
+uint8_t initKlineKwpFast();
+uint8_t transceiveKlineFrame(const uint8_t* txData, size_t txLen, uint8_t* rxBuf, size_t& rxLen, uint32_t timeoutMs);
 void processStreamBuffer(uint8_t* buffer, size_t& head, bool fromBluetooth);
 void handleParsedCommand(uint8_t cmd, uint16_t len, const uint8_t* payload, bool fromBluetooth);
 void broadcastBinaryPacket(uint8_t cmd, const uint8_t* payload, uint16_t len);
 void sendPong(bool toBluetooth);
 void sendCanStatus(bool toBluetooth);
+void sendKlineStatus(bool toBluetooth);
 uint8_t calculateChecksum(uint8_t cmd, uint16_t len, const uint8_t* payload);
 void runObdTest();
 void printTwaiStatus();
+
+// Check if K-Line is in IDLE HIGH state (GPIO16 RX2)
+// On a passive OBD-II K-Line, the line is pulled HIGH to Vbatt (~12V) through a pull-up resistor.
+// If the line is stuck LOW (GND), line is either shorted or disconnected.
+bool checkKlineIdleState() {
+  pinMode(KLINE_RX_PIN, INPUT_PULLUP);
+  int lowCount = 0;
+  for (int i = 0; i < 50; i++) {
+    if (digitalRead(KLINE_RX_PIN) == LOW) lowCount++;
+    delayMicroseconds(1000);
+  }
+  if (lowCount >= 40) {
+    Serial.println("[KLINE-HW] ERROR: K-Line stuck LOW! Check line pull-up or GND short.");
+    return false;
+  }
+  return true;
+}
+
+// Strip single-wire transceiver loopback echo from RX buffer
+size_t stripTxEcho(const uint8_t* txBuf, size_t txLen, const uint8_t* rawRxBuf, size_t rawRxLen, uint8_t* cleanRxBuf) {
+  size_t echoCount = 0;
+  while (echoCount < txLen && echoCount < rawRxLen) {
+    if (rawRxBuf[echoCount] == txBuf[echoCount]) {
+      echoCount++;
+    } else {
+      break;
+    }
+  }
+  size_t cleanLen = 0;
+  for (size_t i = echoCount; i < rawRxLen; i++) {
+    cleanRxBuf[cleanLen++] = rawRxBuf[i];
+  }
+  return cleanLen;
+}
+
+// Legacy helper retained for backward compatibility
+void klineFlushRxEcho(size_t expectedEchoCount) {
+  unsigned long start = millis();
+  size_t readCount = 0;
+  while (readCount < expectedEchoCount && (millis() - start) < 100) {
+    if (Serial2.available()) {
+      Serial2.read();
+      readCount++;
+    } else {
+      delay(1);
+    }
+  }
+}
+
+// ISO 9141-2 5-Baud Slow Initialization (Target address 0x33)
+uint8_t initKlineIso9141() {
+  Serial.println("[KLINE-INIT] Starting ISO 9141-2 5-Baud Slow Initialization...");
+  if (!checkKlineIdleState()) {
+    klineState.initialized = false;
+    klineState.rxErrorCount++;
+    klineState.lastErrorCode = KLINE_STATUS_NO_VOLTAGE;
+    return KLINE_STATUS_NO_VOLTAGE;
+  }
+
+  Serial2.end();
+  pinMode(KLINE_TX_PIN, OUTPUT);
+  digitalWrite(KLINE_TX_PIN, HIGH);
+  delay(300); // Tidle >= 300ms
+
+  // 5-baud address 0x33 = 0b00110011
+  // Start bit (0), LSB first: 1, 1, 0, 0, 1, 1, 0, 0, Stop bit (1)
+  uint8_t addrBits[10] = {0, 1, 1, 0, 0, 1, 1, 0, 0, 1};
+  for (int i = 0; i < 10; i++) {
+    digitalWrite(KLINE_TX_PIN, addrBits[i] ? HIGH : LOW);
+    delay(200); // 200ms per bit = 5 baud
+  }
+  digitalWrite(KLINE_TX_PIN, HIGH);
+
+  // Switch to HardwareSerial2 @ 10400 bps 8N1
+  Serial2.begin(KLINE_BAUDRATE, SERIAL_8N1, KLINE_RX_PIN, KLINE_TX_PIN);
+
+  // Wait W1 (up to 300ms) for Sync byte 0x55
+  unsigned long t0 = millis();
+  uint8_t syncByte = 0;
+  while ((millis() - t0) < 300) {
+    if (Serial2.available()) {
+      syncByte = Serial2.read();
+      break;
+    }
+    delay(1);
+  }
+
+  if (syncByte != 0x55) {
+    Serial.printf("[KLINE-INIT] FAIL: Expected Sync Byte 0x55, got 0x%02X\n", syncByte);
+    klineState.initialized = false;
+    klineState.rxErrorCount++;
+    klineState.lastErrorCode = KLINE_STATUS_INIT_FAILED;
+    return KLINE_STATUS_INIT_FAILED;
+  }
+
+  // Read KeyByte 1 and KeyByte 2 within W2/W3 (up to 300ms)
+  uint8_t kb1 = 0, kb2 = 0;
+  t0 = millis();
+  while ((millis() - t0) < 300 && !Serial2.available()) delay(1);
+  if (Serial2.available()) kb1 = Serial2.read();
+
+  t0 = millis();
+  while ((millis() - t0) < 300 && !Serial2.available()) delay(1);
+  if (Serial2.available()) kb2 = Serial2.read();
+
+  Serial.printf("[KLINE-INIT] ISO 9141 Sync OK (0x55). KeyBytes: KB1=0x%02X, KB2=0x%02X\n", kb1, kb2);
+
+  delay(30); // W4 delay (20..50ms)
+
+  // Transmit inverted KB2 (~KB2) back to ECU
+  uint8_t invKb2 = ~kb2;
+  Serial2.write(invKb2);
+
+  // Strip self-echo of ~KB2
+  t0 = millis();
+  while ((millis() - t0) < 50) {
+    if (Serial2.available()) {
+      uint8_t echo = Serial2.read();
+      if (echo == invKb2) break;
+    }
+    delay(1);
+  }
+
+  // Wait W5 (up to 300ms) for ECU confirmation byte 0xCC (~0x33)
+  uint8_t invAddrResp = 0;
+  t0 = millis();
+  while ((millis() - t0) < 300) {
+    if (Serial2.available()) {
+      invAddrResp = Serial2.read();
+      break;
+    }
+    delay(1);
+  }
+
+  if (invAddrResp != 0xCC) {
+    Serial.printf("[KLINE-INIT] FAIL: Expected ECU Confirmation 0xCC (~0x33), got 0x%02X\n", invAddrResp);
+    klineState.initialized = false;
+    klineState.rxErrorCount++;
+    klineState.lastErrorCode = KLINE_STATUS_INIT_FAILED;
+    return KLINE_STATUS_INIT_FAILED;
+  }
+
+  // Distinguish protocol based on KeyBytes
+  if ((kb1 == 0x8F && kb2 == 0x27) || ((kb2 & 0x80) && kb2 != 0xEA)) {
+    klineState.activeProtocol = KLINE_PROTO_KWP2000_SLOW;
+    Serial.println("[KLINE-INIT] Detected Protocol: ISO 14230-4 KWP2000 (Slow Init)");
+  } else {
+    klineState.activeProtocol = KLINE_PROTO_ISO9141_SLOW;
+    Serial.println("[KLINE-INIT] Detected Protocol: ISO 9141-2 (5-Baud Slow Init)");
+  }
+
+  klineState.initialized = true;
+  klineState.keyByte1 = kb1;
+  klineState.keyByte2 = kb2;
+  klineState.lastErrorCode = KLINE_STATUS_SUCCESS;
+  Serial.println("[KLINE-INIT] Slow Initialization SUCCESSFUL!");
+  return KLINE_STATUS_SUCCESS;
+}
+
+// ISO 14230-4 KWP2000 Fast Initialization
+uint8_t initKlineKwpFast() {
+  Serial.println("[KLINE-INIT] Starting ISO 14230-4 KWP2000 Fast Initialization...");
+  if (!checkKlineIdleState()) {
+    klineState.initialized = false;
+    klineState.rxErrorCount++;
+    klineState.lastErrorCode = KLINE_STATUS_NO_VOLTAGE;
+    return KLINE_STATUS_NO_VOLTAGE;
+  }
+
+  Serial2.end();
+  pinMode(KLINE_TX_PIN, OUTPUT);
+  digitalWrite(KLINE_TX_PIN, HIGH);
+  delay(300); // Tidle >= 300ms
+
+  // Fast Init Pulse: Tini_low = 25ms LOW, Tini_high = 25ms HIGH
+  digitalWrite(KLINE_TX_PIN, LOW);
+  delay(25);
+  digitalWrite(KLINE_TX_PIN, HIGH);
+  delay(25);
+
+  // Switch to HardwareSerial2 @ 10400 bps 8N1
+  Serial2.begin(KLINE_BAUDRATE, SERIAL_8N1, KLINE_RX_PIN, KLINE_TX_PIN);
+
+  // KWP2000 Start Communication Frame: 0xC1 0x33 0xF1 0x81 0x66
+  // Format = 0xC1, Target = 0x33, Source = 0xF1, Service = 0x81, CS = 0x66
+  uint8_t startCommReq[5] = {0xC1, 0x33, 0xF1, 0x81, 0x66};
+  
+  uint32_t tStart = millis();
+  Serial.printf("[KLINE-TX] [+%04ums] C1 33 F1 81 66\n", tStart);
+  Serial2.write(startCommReq, 5);
+
+  // Read raw response from UART2
+  uint8_t rawRx[32];
+  size_t rawRxLen = 0;
+  unsigned long t0 = millis();
+  while ((millis() - t0) < 300 && rawRxLen < 32) {
+    if (Serial2.available()) {
+      rawRx[rawRxLen++] = Serial2.read();
+      t0 = millis();
+    } else {
+      delay(2);
+    }
+  }
+
+  // Strip single-wire loopback echo
+  uint8_t cleanRx[32];
+  size_t cleanRxLen = stripTxEcho(startCommReq, 5, rawRx, rawRxLen, cleanRx);
+
+  if (cleanRxLen < 5) {
+    Serial.printf("[KLINE-INIT] KWP Fast Init TIMEOUT / NO RESPONSE (Clean RX len=%u)\n", cleanRxLen);
+    klineState.initialized = false;
+    klineState.rxErrorCount++;
+    klineState.lastErrorCode = KLINE_STATUS_ECU_NO_RESPONSE;
+    return KLINE_STATUS_ECU_NO_RESPONSE;
+  }
+
+  // Verify response checksum
+  uint8_t cs = 0;
+  for (size_t i = 0; i < cleanRxLen - 1; i++) cs += cleanRx[i];
+
+  if (cs != cleanRx[cleanRxLen - 1]) {
+    Serial.printf("[KLINE-INIT] KWP Fast Init CHECKSUM ERROR (Calc 0x%02X != Recv 0x%02X)\n", cs, cleanRx[cleanRxLen - 1]);
+    klineState.initialized = false;
+    klineState.rxErrorCount++;
+    klineState.lastErrorCode = KLINE_STATUS_CHECKSUM_ERROR;
+    return KLINE_STATUS_CHECKSUM_ERROR;
+  }
+
+  // Log raw RX with timestamp
+  Serial.printf("[KLINE-RX] [+%04ums] ", millis() - tStart);
+  for (size_t i = 0; i < cleanRxLen; i++) Serial.printf("%02X ", cleanRx[i]);
+  Serial.println();
+
+  Serial.printf("[KLINE-INIT] KWP2000 Fast Init SUCCESS! Response RX len=%u\n", cleanRxLen);
+
+  klineState.initialized = true;
+  klineState.activeProtocol = KLINE_PROTO_KWP2000_FAST;
+  klineState.keyByte1 = cleanRxLen >= 6 ? cleanRx[4] : 0x8F;
+  klineState.keyByte2 = cleanRxLen >= 7 ? cleanRx[5] : 0xEA;
+  klineState.lastErrorCode = KLINE_STATUS_SUCCESS;
+  return KLINE_STATUS_SUCCESS;
+}
+
+// Transceive K-Line diagnostic frame
+uint8_t transceiveKlineFrame(const uint8_t* txData, size_t txLen, uint8_t* rxBuf, size_t& rxLen, uint32_t timeoutMs) {
+  if (!klineState.initialized) {
+    if (initKlineKwpFast() != KLINE_STATUS_SUCCESS) {
+      if (initKlineIso9141() != KLINE_STATUS_SUCCESS) {
+        return klineState.lastErrorCode;
+      }
+    }
+  }
+
+  uint8_t frameTx[64];
+  size_t frameTxLen = 0;
+
+  if (klineState.activeProtocol == KLINE_PROTO_ISO9141_SLOW) {
+    // ISO 9141-2 Header: 0x68 0x6A 0xF1 + txData + CS
+    frameTx[0] = 0x68;
+    frameTx[1] = 0x6A;
+    frameTx[2] = 0xF1;
+    for (size_t i = 0; i < txLen; i++) frameTx[3 + i] = txData[i];
+    frameTxLen = 3 + txLen;
+
+    uint8_t cs = 0;
+    for (size_t i = 0; i < frameTxLen; i++) cs += frameTx[i];
+    frameTx[frameTxLen++] = cs;
+  } else {
+    // KWP2000 Header: (0x80 | (txLen & 0x3F)) 0x33 0xF1 + txData + CS
+    frameTx[0] = 0x80 | (txLen & 0x3F);
+    frameTx[1] = 0x33;
+    frameTx[2] = 0xF1;
+    for (size_t i = 0; i < txLen; i++) frameTx[3 + i] = txData[i];
+    frameTxLen = 3 + txLen;
+
+    uint8_t cs = 0;
+    for (size_t i = 0; i < frameTxLen; i++) cs += frameTx[i];
+    frameTx[frameTxLen++] = cs;
+  }
+
+  uint32_t tStart = millis();
+  Serial.printf("[KLINE-TX] [+%04ums] ", tStart);
+  for (size_t i = 0; i < frameTxLen; i++) Serial.printf("%02X ", frameTx[i]);
+  Serial.println();
+
+  // Send to physical UART2
+  Serial2.write(frameTx, frameTxLen);
+
+  // Read raw RX bytes from single-wire bus
+  uint8_t rawRx[128];
+  size_t rawRxLen = 0;
+  unsigned long startT = millis();
+  while ((millis() - startT) < timeoutMs && rawRxLen < 128) {
+    if (Serial2.available()) {
+      rawRx[rawRxLen++] = Serial2.read();
+      startT = millis();
+    } else {
+      delay(1);
+    }
+  }
+
+  // Strip single-wire loopback echo
+  uint8_t cleanRx[128];
+  size_t cleanRxLen = stripTxEcho(frameTx, frameTxLen, rawRx, rawRxLen, cleanRx);
+
+  if (cleanRxLen == 0) {
+    Serial.printf("[KLINE-RX] [+%04ums] ERROR: ECU No Response (Timeout)\n", millis() - tStart);
+    klineState.rxErrorCount++;
+    klineState.lastErrorCode = KLINE_STATUS_ECU_NO_RESPONSE;
+    return KLINE_STATUS_ECU_NO_RESPONSE;
+  }
+
+  // Validate response checksum
+  uint8_t rxCs = 0;
+  for (size_t i = 0; i < cleanRxLen - 1; i++) rxCs += cleanRx[i];
+
+  if (rxCs != cleanRx[cleanRxLen - 1]) {
+    Serial.printf("[KLINE-RX] [+%04ums] ERROR: Checksum Mismatch (Calc 0x%02X != Recv 0x%02X)\n", millis() - tStart, rxCs, cleanRx[cleanRxLen - 1]);
+    klineState.rxErrorCount++;
+    klineState.lastErrorCode = KLINE_STATUS_CHECKSUM_ERROR;
+    return KLINE_STATUS_CHECKSUM_ERROR;
+  }
+
+  Serial.printf("[KLINE-RX] [+%04ums] ", millis() - tStart);
+  for (size_t i = 0; i < cleanRxLen; i++) Serial.printf("%02X ", cleanRx[i]);
+  Serial.println();
+
+  rxLen = cleanRxLen;
+  for (size_t i = 0; i < cleanRxLen; i++) rxBuf[i] = cleanRx[i];
+
+  klineState.lastErrorCode = KLINE_STATUS_SUCCESS;
+  return KLINE_STATUS_SUCCESS;
+}
 
 // ----------------------------------------------------------------------------
 // CAN (TWAI) Initialization & Driver Management
@@ -387,6 +765,65 @@ void handleParsedCommand(uint8_t cmd, uint16_t len, const uint8_t* payload, bool
       break;
     }
 
+    case CMD_CONFIG_PROTOCOL: {
+      if (len >= 1) {
+        uint8_t protoId = payload[0];
+        Serial.printf("[CONFIG-PROTO] Protocol requested: 0x%02X\n", protoId);
+        if (protoId >= KLINE_PROTO_CAN_11_500 && protoId <= KLINE_PROTO_CAN_29_250) {
+          uint32_t speed = (protoId == KLINE_PROTO_CAN_11_250 || protoId == KLINE_PROTO_CAN_29_250) ? 250 : 500;
+          initCAN(speed);
+        } else if (protoId == KLINE_PROTO_KWP2000_FAST) {
+          initKlineKwpFast();
+        } else if (protoId == KLINE_PROTO_ISO9141_SLOW || protoId == KLINE_PROTO_KWP2000_SLOW) {
+          initKlineIso9141();
+        }
+      }
+      break;
+    }
+
+    case CMD_KLINE_INIT: {
+      uint8_t protoId = (len >= 1) ? payload[0] : KLINE_PROTO_AUTO;
+      uint8_t status = KLINE_STATUS_INIT_FAILED;
+      if (protoId == KLINE_PROTO_KWP2000_FAST) {
+        status = initKlineKwpFast();
+      } else if (protoId == KLINE_PROTO_ISO9141_SLOW || protoId == KLINE_PROTO_KWP2000_SLOW) {
+        status = initKlineIso9141();
+      } else {
+        // Auto mode: try KWP Fast first, then ISO 9141 Slow
+        status = initKlineKwpFast();
+        if (status != KLINE_STATUS_SUCCESS) {
+          status = initKlineIso9141();
+        }
+      }
+
+      uint8_t respPayload[4];
+      respPayload[0] = status;
+      respPayload[1] = klineState.activeProtocol;
+      respPayload[2] = klineState.keyByte1;
+      respPayload[3] = klineState.keyByte2;
+      broadcastBinaryPacket(CMD_KLINE_INIT_RESP, respPayload, 4);
+      break;
+    }
+
+    case CMD_KLINE_FRAME: {
+      if (len >= 1) {
+        uint8_t rxBuf[64];
+        size_t rxLen = 0;
+        uint8_t status = transceiveKlineFrame(payload, len, rxBuf, rxLen, 500);
+
+        uint8_t respBuf[65];
+        respBuf[0] = status;
+        for (size_t i = 0; i < rxLen; i++) respBuf[1 + i] = rxBuf[i];
+        broadcastBinaryPacket(CMD_KLINE_FRAME, respBuf, 1 + rxLen);
+      }
+      break;
+    }
+
+    case CMD_KLINE_STATUS_REQ: {
+      sendKlineStatus(fromBluetooth);
+      break;
+    }
+
     default:
       break;
   }
@@ -486,6 +923,20 @@ void sendCanStatus(bool toBluetooth) {
   statusPayload[17] = stats.messagesReceived & 0xFF;
 
   broadcastBinaryPacket(CMD_CAN_STATUS_RESP, statusPayload, 21);
+}
+
+void sendKlineStatus(bool toBluetooth) {
+  uint8_t statusPayload[8];
+  statusPayload[0] = checkKlineIdleState() ? 0x01 : 0x00;
+  statusPayload[1] = klineState.activeProtocol;
+  statusPayload[2] = klineState.initialized ? 0x01 : 0x00;
+  statusPayload[3] = (klineState.rxErrorCount >> 8) & 0xFF;
+  statusPayload[4] = klineState.rxErrorCount & 0xFF;
+  statusPayload[5] = (klineState.txErrorCount >> 8) & 0xFF;
+  statusPayload[6] = klineState.txErrorCount & 0xFF;
+  statusPayload[7] = klineState.lastErrorCode;
+
+  broadcastBinaryPacket(CMD_KLINE_STATUS_RESP, statusPayload, 8);
 }
 
 // ----------------------------------------------------------------------------

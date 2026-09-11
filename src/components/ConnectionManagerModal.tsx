@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useI18n } from '../i18n/I18nContext';
 import { ConnectionConfig, ConnectionStatus, TransportType, BluetoothDeviceInfo, CanBusStatus } from '../types';
 import { transportManager } from '../network/TransportManager';
-import { Wifi, Bluetooth, Activity, RefreshCw, CheckCircle2, XCircle, AlertTriangle, ShieldCheck, Radio, Server, Cpu, Zap, X } from 'lucide-react';
+import { Wifi, Bluetooth, Activity, RefreshCw, CheckCircle2, XCircle, AlertTriangle, ShieldCheck, Radio, Server, Cpu, Zap, X, ExternalLink } from 'lucide-react';
 
 interface ConnectionManagerModalProps {
   isOpen: boolean;
@@ -35,6 +35,8 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
   const [isPinging, setIsPinging] = useState<boolean>(false);
   const [canBusStatus, setCanBusStatus] = useState<CanBusStatus | null>(null);
   const [isTestingCan, setIsTestingCan] = useState<boolean>(false);
+  const [klineStatus, setKlineStatus] = useState<{ voltagePresent?: boolean; activeProtocol?: number; initialized?: boolean; rxErrorCount?: number } | null>(null);
+  const [isTestingKline, setIsTestingKline] = useState<boolean>(false);
 
   const loadInitialDevices = () => {
     const presets: BluetoothDeviceInfo[] = [
@@ -191,6 +193,19 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
     }
   };
 
+  const handleTestKline = async () => {
+    setIsTestingKline(true);
+    try {
+      const initRes = await transportManager.initKline(0x00);
+      const statusRes = await transportManager.getKlineStatus();
+      setKlineStatus(statusRes || { initialized: initRes.success, activeProtocol: initRes.activeProtocol });
+    } catch {
+      setKlineStatus(null);
+    } finally {
+      setIsTestingKline(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
       <div 
@@ -281,15 +296,46 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
             {status === 'ERROR' && (
               <div className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/40 text-rose-200 text-xs flex items-start gap-2.5">
                 <AlertTriangle className="w-4 h-4 text-rose-400 flex-shrink-0 mt-0.5" />
-                <div className="flex-1">
-                  <div className="font-bold mb-0.5">
-                    {isRtl ? 'تفاصيل الخطأ في الاتصال' : 'Connection Error Detail'}
+                <div className="flex-1 space-y-2">
+                  <div>
+                    <div className="font-bold mb-0.5">
+                      {isRtl ? 'تفاصيل الخطأ في الاتصال' : 'Connection Error Detail'}
+                    </div>
+                    <p className="text-[11px] text-rose-300 leading-relaxed font-mono">
+                      {transportManager.getTransport().getRawConnectionState?.()?.error || (
+                        isRtl ? 'تعذر الاتصال بالجهاز. تأكد من تشغيل القطعة أو فتح التطبيق في تبويب جديد.' : 'Failed to connect. Ensure device is powered or open app in new tab.'
+                      )}
+                    </p>
                   </div>
-                  <p className="text-[11px] text-rose-300 leading-relaxed font-mono">
-                    {transportManager.getTransport().getRawConnectionState?.()?.error || (
-                      isRtl ? 'تعذر الاتصال بالجهاز. تأكد من تشغيل القطعة أو فتح التطبيق في تبويب جديد.' : 'Failed to connect. Ensure device is powered or open app in new tab.'
-                    )}
-                  </p>
+
+                  {/* Quick fallback buttons if restricted in iframe */}
+                  {(transportManager.getTransport().getRawConnectionState?.()?.error?.includes('iframe') ||
+                    transportManager.getTransport().getRawConnectionState?.()?.error?.includes('restricted') ||
+                    transportManager.getTransport().getRawConnectionState?.()?.error?.includes('permissions policy')) && (
+                    <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-rose-900/50">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          onUpdateConfig({ isMockMode: true });
+                          transportManager.updateConfig({ isMockMode: true });
+                          await transportManager.connect();
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] transition-all flex items-center gap-1 shadow"
+                      >
+                        <Zap className="w-3 h-3" />
+                        {isRtl ? 'تفعيل الوضع المحاكي (Mock Mode)' : 'Enable Mock Mode (Preview)'}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => window.open(window.location.href, '_blank')}
+                        className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-[11px] border border-slate-600 transition-all flex items-center gap-1"
+                      >
+                        <ExternalLink className="w-3 h-3 text-cyan-400" />
+                        {isRtl ? 'فتح في تبويب جديد (Open in New Tab)' : 'Open in New Tab'}
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -531,10 +577,10 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
           <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-3">
             <div className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
               <Activity className="w-4 h-4 text-amber-400" />
-              {isRtl ? 'مصفوفة اختبار الاتصال والـ CAN (Test Matrix)' : 'Hardware & CAN Diagnostic Test Matrix'}
+              {isRtl ? 'مصفوفة اختبار الهاردوير (CAN + K-Line)' : 'Hardware Diagnostic Test Matrix (CAN + K-Line)'}
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               {/* Ping Test Button */}
               <button
                 type="button"
@@ -548,7 +594,7 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
                     PING TEST
                   </div>
                   <div className="text-[11px] text-slate-400">
-                    {pingResult ? `${pingResult.latencyMs}ms (${pingResult.info || 'OK'})` : 'Measure Round-Trip Latency'}
+                    {pingResult ? `${pingResult.latencyMs}ms (${pingResult.info || 'OK'})` : 'Measure Latency'}
                   </div>
                 </div>
                 {isPinging ? (
@@ -570,10 +616,10 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
                 <div>
                   <div className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
                     <Cpu className="w-3.5 h-3.5 text-emerald-400" />
-                    CAN STATUS
+                    CAN BUS
                   </div>
                   <div className="text-[11px] text-slate-400">
-                    {canBusStatus ? `CAN: ${canBusStatus.state} @ ${canBusStatus.speed / 1000}k` : 'Query TWAI Controller State'}
+                    {canBusStatus ? `CAN: ${canBusStatus.state} @ ${canBusStatus.speed / 1000}k` : 'Query TWAI State'}
                   </div>
                 </div>
                 {isTestingCan ? (
@@ -582,6 +628,31 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
                   <span className="text-xs font-bold text-emerald-400 font-mono">READY</span>
                 ) : (
                   <span className="text-xs text-slate-500 font-mono">Query</span>
+                )}
+              </button>
+
+              {/* K-Line Hardware Test Button */}
+              <button
+                type="button"
+                onClick={handleTestKline}
+                disabled={isTestingKline}
+                className="p-3 rounded-xl bg-slate-900 border border-slate-700 hover:border-slate-600 text-start flex items-center justify-between transition-all"
+              >
+                <div>
+                  <div className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+                    <Zap className="w-3.5 h-3.5 text-amber-400" />
+                    K-LINE BUS
+                  </div>
+                  <div className="text-[11px] text-slate-400">
+                    {klineStatus ? `K-Line: ${klineStatus.initialized ? 'INIT OK' : 'NO LINK'}` : 'ISO 9141 / KWP2000'}
+                  </div>
+                </div>
+                {isTestingKline ? (
+                  <RefreshCw className="w-4 h-4 text-amber-400 animate-spin" />
+                ) : klineStatus?.initialized ? (
+                  <span className="text-xs font-bold text-amber-400 font-mono">READY</span>
+                ) : (
+                  <span className="text-xs text-slate-500 font-mono">Init</span>
                 )}
               </button>
             </div>

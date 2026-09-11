@@ -8,7 +8,7 @@
  * [0xAA 0x55] [CMD (1B)] [LEN (2B)] [PAYLOAD (N Bytes)] [CHECKSUM (1B)] [0x0D 0x0A]
  */
 
-import { CanFrame, CanBusStatus } from '../types';
+import { CanFrame, CanBusStatus, KlineStatus, ProtocolType } from '../types';
 
 export enum BinaryCommand {
   CMD_CAN_FRAME = 0x01,
@@ -18,6 +18,12 @@ export enum BinaryCommand {
   CMD_CAN_STATUS_RESP = 0x05,
   CMD_CONFIG_CAN = 0x06,
   CMD_HEARTBEAT = 0x07,
+  CMD_CONFIG_PROTOCOL = 0x08,
+  CMD_KLINE_INIT = 0x09,
+  CMD_KLINE_INIT_RESP = 0x0A,
+  CMD_KLINE_FRAME = 0x0B,
+  CMD_KLINE_STATUS_REQ = 0x0C,
+  CMD_KLINE_STATUS_RESP = 0x0D,
   CMD_ERROR = 0xFF
 }
 
@@ -28,6 +34,28 @@ export interface DecodedBinaryPacket {
   isValid: boolean;
   canFrame?: CanFrame;
   canStatus?: CanBusStatus;
+  klineStatus?: KlineStatus;
+  klineInitResp?: {
+    statusCode: number;
+    statusText: string;
+    activeProtocol: ProtocolType;
+    keyBytes?: [number, number];
+  };
+  klineInitResult?: {
+    success: boolean;
+    activeProtocol: number;
+    keyByte1: number;
+    keyByte2: number;
+  };
+  klineFrame?: {
+    statusCode: number;
+    dataBytes: number[];
+    rawHex: string;
+  };
+  klineFrameResult?: {
+    status: number;
+    data: number[];
+  };
   pongInfo?: {
     uptimeMs: number;
     canReady: boolean;
@@ -286,8 +314,108 @@ export class BinaryProtocol {
         messagesSent,
         messagesReceived
       };
+    } else if (cmd === BinaryCommand.CMD_KLINE_INIT_RESP && payload.length >= 2) {
+      const statusCode = payload[0];
+      const protoByte = payload[1];
+      const kb1 = payload.length >= 3 ? payload[2] : 0;
+      const kb2 = payload.length >= 4 ? payload[3] : 0;
+
+      let protoText: ProtocolType = 'ISO 9141-2';
+      if (protoByte === 0x06) protoText = 'ISO 14230-4 (KWP2000 Fast)';
+      else if (protoByte === 0x07) protoText = 'ISO 14230-4 (KWP2000 Slow)';
+
+      let statusText = 'SUCCESS';
+      if (statusCode === 0x01) statusText = 'NO_KLINE_VOLTAGE';
+      else if (statusCode === 0x02) statusText = 'INIT_FAILED';
+      else if (statusCode === 0x03) statusText = 'KEYBYTE_MISMATCH';
+      else if (statusCode === 0x04) statusText = 'ECU_NO_RESPONSE';
+      else if (statusCode === 0x05) statusText = 'CHECKSUM_ERROR';
+
+      result.klineInitResp = {
+        statusCode,
+        statusText,
+        activeProtocol: protoText,
+        keyBytes: [kb1, kb2]
+      };
+      result.klineInitResult = {
+        success: statusCode === 0x00,
+        activeProtocol: protoByte,
+        keyByte1: kb1,
+        keyByte2: kb2
+      };
+    } else if (cmd === BinaryCommand.CMD_KLINE_FRAME && payload.length >= 1) {
+      const statusCode = payload[0];
+      const dataBytes = Array.from(payload.slice(1));
+      const rawHex = dataBytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+
+      result.klineFrame = {
+        statusCode,
+        dataBytes,
+        rawHex
+      };
+      result.klineFrameResult = {
+        status: statusCode,
+        data: dataBytes
+      };
+    } else if (cmd === BinaryCommand.CMD_KLINE_STATUS_RESP && payload.length >= 7) {
+      const voltageOk = payload[0] === 0x01;
+      const protoByte = payload[1];
+      const initialized = payload[2] === 0x01;
+      const rxErrorCount = (payload[3] << 8) | payload[4];
+      const txErrorCount = (payload[5] << 8) | payload[6];
+      const errCodeByte = payload.length >= 8 ? payload[7] : 0;
+
+      let protoText: ProtocolType = 'ISO 9141-2';
+      if (protoByte === 0x01) protoText = 'ISO 15765-4 (CAN 11/500)';
+      else if (protoByte === 0x02) protoText = 'ISO 15765-4 (CAN 29/500)';
+      else if (protoByte === 0x06) protoText = 'ISO 14230-4 (KWP2000 Fast)';
+      else if (protoByte === 0x07) protoText = 'ISO 14230-4 (KWP2000 Slow)';
+
+      let lastErr: KlineStatus['lastErrorCode'] = 'KLINE_OK';
+      if (errCodeByte === 0x01) lastErr = 'NO_KLINE_VOLTAGE';
+      else if (errCodeByte === 0x02) lastErr = 'INIT_FAILED';
+      else if (errCodeByte === 0x03) lastErr = 'NO_ECU_RESPONSE';
+      else if (errCodeByte === 0x04) lastErr = 'CHECKSUM_ERROR';
+      else if (errCodeByte === 0x05) lastErr = 'TIMEOUT';
+
+      result.klineStatus = {
+        voltageOk,
+        activeProtocol: protoText,
+        initialized,
+        rxErrorCount,
+        txErrorCount,
+        lastErrorCode: lastErr
+      };
     }
 
     return result;
+  }
+
+  /**
+   * Encode Config Protocol packet
+   */
+  public static encodeConfigProtocol(protocolId: number): Uint8Array {
+    return this.wrapPacket(BinaryCommand.CMD_CONFIG_PROTOCOL, new Uint8Array([protocolId]));
+  }
+
+  /**
+   * Encode K-Line Init packet
+   */
+  public static encodeKlineInit(protocolId: number = 0x00): Uint8Array {
+    return this.wrapPacket(BinaryCommand.CMD_KLINE_INIT, new Uint8Array([protocolId]));
+  }
+
+  /**
+   * Encode K-Line Frame packet
+   */
+  public static encodeKlineFrame(frameBytes: number[]): Uint8Array {
+    return this.wrapPacket(BinaryCommand.CMD_KLINE_FRAME, new Uint8Array(frameBytes));
+  }
+
+  /**
+   * Encode K-Line Status Request packet
+   */
+  public static encodeKlineStatusReq(): Uint8Array {
+    return this.wrapPacket(BinaryCommand.CMD_KLINE_STATUS_REQ, new Uint8Array(0));
   }
 }

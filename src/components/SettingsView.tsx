@@ -273,44 +273,78 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ config, setConfig, s
           </div>
         </div>
 
-        {/* Section 2: CAN Bus & Protocol Configuration */}
+        {/* Section 2: CAN Bus & K-Line Protocol Configuration */}
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4 shadow-lg">
           <h3 className="text-xs font-bold text-blue-400 uppercase tracking-wider flex items-center gap-2">
             <Radio className="h-4 w-4" />
-            <span>{t('canConfigTitle')}</span>
+            <span>{t('canConfigTitle')} & K-Line Interface</span>
           </h3>
 
           <div>
             <label className="text-xs font-bold text-slate-400 block mb-1">
-              CAN Bus Baud Rate (Speed)
+              Active Vehicle Protocol
             </label>
             <select
-              value={formData.canSpeed}
-              onChange={(e) => setFormData({ ...formData, canSpeed: e.target.value as any })}
+              value={formData.protocol}
+              onChange={(e) => setFormData({ ...formData, protocol: e.target.value })}
               className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-blue-500"
             >
-              <option value="500K">500 kbps (High Speed CAN — Standard Modern)</option>
-              <option value="250K">250 kbps (Medium Speed CAN)</option>
-              <option value="125K">125 kbps (Low Speed CAN)</option>
-              <option value="1M">1 Mbps (CAN-FD / Fast High Speed)</option>
+              <option value="ISO 15765-4 (CAN 11/500)">ISO 15765-4 (CAN 11-bit, 500 kbps) — Standard Modern</option>
+              <option value="ISO 15765-4 (CAN 29/500)">ISO 15765-4 (CAN 29-bit, 500 kbps) — Extended Modern</option>
+              <option value="ISO 14230-4 (KWP Fast)">ISO 14230-4 (KWP2000 Fast Init — 10.4 kbps K-Line)</option>
+              <option value="ISO 9141-2 (5-Baud)">ISO 9141-2 (5-Baud Slow Init — 10.4 kbps K-Line)</option>
             </select>
           </div>
 
-          <div>
-            <label className="text-xs font-bold text-slate-400 block mb-1">
-              CAN Addressing Mode
-            </label>
-            <select
-              value={formData.canMode}
-              onChange={(e) => setFormData({ ...formData, canMode: e.target.value as any })}
-              className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-blue-500"
-            >
-              <option value="11-bit">Standard 11-bit CAN Identifier (ISO 15765-4)</option>
-              <option value="29-bit">Extended 29-bit CAN Identifier (ISO 15765-4 Extended / J1939)</option>
-            </select>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs font-bold text-slate-400 block mb-1">
+                CAN Speed / Baud Rate
+              </label>
+              <select
+                value={formData.canSpeed}
+                onChange={(e) => setFormData({ ...formData, canSpeed: e.target.value as any })}
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-blue-500"
+              >
+                <option value="500K">500 kbps (High Speed)</option>
+                <option value="250K">250 kbps (Medium Speed)</option>
+                <option value="125K">125 kbps (Low Speed)</option>
+                <option value="1M">1 Mbps (High Speed)</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="text-xs font-bold text-slate-400 block mb-1">
+                CAN Addressing Mode
+              </label>
+              <select
+                value={formData.canMode}
+                onChange={(e) => setFormData({ ...formData, canMode: e.target.value as any })}
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-blue-500"
+              >
+                <option value="11-bit">Standard 11-bit Identifier</option>
+                <option value="29-bit">Extended 29-bit Identifier</option>
+              </select>
+            </div>
           </div>
 
-          <div className="pt-2">
+          {/* ESP32 Physical Pinout Banner */}
+          <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 text-[11px] font-mono space-y-1">
+            <div className="text-cyan-400 font-bold text-xs flex items-center justify-between">
+              <span>ESP32 Hardware Pinouts (CAN & K-Line)</span>
+              <span className="text-[10px] text-emerald-400 font-normal">Active Transceivers</span>
+            </div>
+            <div className="text-slate-300 flex justify-between">
+              <span>CAN Bus:</span>
+              <span className="text-slate-400">TX=GPIO22, RX=GPIO21 (OBD Pins 6/14)</span>
+            </div>
+            <div className="text-slate-300 flex justify-between">
+              <span>K-Line Bus:</span>
+              <span className="text-slate-400">RX2=GPIO16, TX2=GPIO17 (OBD Pin 7)</span>
+            </div>
+          </div>
+
+          <div className="pt-1">
             <label className="flex items-center gap-3 cursor-pointer">
               <input
                 type="checkbox"

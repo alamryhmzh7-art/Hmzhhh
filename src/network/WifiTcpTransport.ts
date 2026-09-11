@@ -26,6 +26,10 @@ export class WifiTcpTransport implements ITransport {
 
   private pingResolver: ((res: PingResult) => void) | null = null;
   private canStatusResolver: ((status: CanBusStatus | null) => void) | null = null;
+  private klineInitResolver: ((res: { success: boolean; activeProtocol: number; keyByte1: number; keyByte2: number }) => void) | null = null;
+  private klineStatusResolver: ((status: any) => void) | null = null;
+  private klineFrameResolver: ((res: { status: number; data: number[] }) => void) | null = null;
+  private klinePacketListeners: ((pkt: DecodedBinaryPacket) => void)[] = [];
   private heartbeatInterval: any = null;
 
   constructor(config: ConnectionConfig) {
@@ -392,7 +396,97 @@ export class WifiTcpTransport implements ITransport {
     packets.forEach(pkt => this.processDecodedPacket(pkt));
   }
 
+  public onKlinePacket(callback: (pkt: DecodedBinaryPacket) => void): () => void {
+    this.klinePacketListeners.push(callback);
+    return () => {
+      this.klinePacketListeners = this.klinePacketListeners.filter(l => l !== callback);
+    };
+  }
+
+  public async sendKlineInit(protocolId?: number): Promise<{ success: boolean; activeProtocol: number; keyByte1: number; keyByte2: number }> {
+    if (this.config.isMockMode) {
+      return { success: true, activeProtocol: protocolId || 0x06, keyByte1: 0x8F, keyByte2: 0xEA };
+    }
+    if (!this.isConnected()) {
+      return { success: false, activeProtocol: 0, keyByte1: 0, keyByte2: 0 };
+    }
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        this.klineInitResolver = null;
+        resolve({ success: false, activeProtocol: 0, keyByte1: 0, keyByte2: 0 });
+      }, 3000);
+
+      this.klineInitResolver = (res) => {
+        clearTimeout(timeout);
+        this.klineInitResolver = null;
+        resolve(res);
+      };
+
+      const pkt = BinaryProtocol.encodeKlineInit(protocolId);
+      this.sendRaw(pkt);
+    });
+  }
+
+  public async sendKlineFrame(payload: number[]): Promise<{ status: number; data: number[] }> {
+    if (this.config.isMockMode) {
+      // Return simulated ECU response for standard OBD-II PID 01 00 (41 00 BE 3E 28 10)
+      if (payload[0] === 0x01 && payload[1] === 0x00) {
+        return { status: 0, data: [0x41, 0x00, 0xBE, 0x3E, 0x28, 0x10] };
+      }
+      return { status: 0, data: [payload[0] + 0x40, payload[1] || 0x00, 0x00, 0x00] };
+    }
+    if (!this.isConnected()) {
+      return { status: 0x04, data: [] };
+    }
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        this.klineFrameResolver = null;
+        resolve({ status: 0x04, data: [] });
+      }, 2500);
+
+      this.klineFrameResolver = (res) => {
+        clearTimeout(timeout);
+        this.klineFrameResolver = null;
+        resolve(res);
+      };
+
+      const pkt = BinaryProtocol.encodeKlineFrame(payload);
+      this.sendRaw(pkt);
+    });
+  }
+
+  public async getKlineStatus(): Promise<any | null> {
+    if (this.config.isMockMode) {
+      return {
+        voltagePresent: true,
+        activeProtocol: 6,
+        initialized: true,
+        rxErrorCount: 0,
+        txErrorCount: 0,
+        lastErrorCode: 0
+      };
+    }
+    if (!this.isConnected()) return null;
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        this.klineStatusResolver = null;
+        resolve(null);
+      }, 2000);
+
+      this.klineStatusResolver = (status) => {
+        clearTimeout(timeout);
+        this.klineStatusResolver = null;
+        resolve(status);
+      };
+
+      const pkt = BinaryProtocol.encodeKlineStatusReq();
+      this.sendRaw(pkt);
+    });
+  }
+
   private processDecodedPacket(pkt: DecodedBinaryPacket) {
+    this.klinePacketListeners.forEach(l => l(pkt));
+
     if (pkt.cmd === BinaryCommand.CMD_CAN_FRAME && pkt.canFrame) {
       commLogger.logPacket({
         direction: '[WiFi RX]',
@@ -421,6 +515,34 @@ export class WifiTcpTransport implements ITransport {
     } else if (pkt.cmd === BinaryCommand.CMD_CAN_STATUS_RESP && pkt.canStatus) {
       if (this.canStatusResolver) {
         this.canStatusResolver(pkt.canStatus);
+      }
+    } else if (pkt.cmd === BinaryCommand.CMD_KLINE_INIT_RESP && pkt.klineInitResult) {
+      commLogger.logPacket({
+        direction: '[KLINE RX]',
+        protocol: pkt.klineInitResp?.activeProtocol || 'K-LINE',
+        decodedData: 'KLINE_INIT',
+        responseRaw: `Status=${pkt.klineInitResult.success ? 'SUCCESS' : 'FAILED'} KB1=0x${pkt.klineInitResult.keyByte1.toString(16).padStart(2, '0').toUpperCase()} KB2=0x${pkt.klineInitResult.keyByte2.toString(16).padStart(2, '0').toUpperCase()}`,
+        durationMs: 0,
+        status: pkt.klineInitResult.success ? 'SUCCESS' : 'ERROR'
+      });
+      if (this.klineInitResolver) {
+        this.klineInitResolver(pkt.klineInitResult);
+      }
+    } else if (pkt.cmd === BinaryCommand.CMD_KLINE_FRAME && pkt.klineFrameResult) {
+      commLogger.logPacket({
+        direction: '[KLINE RX]',
+        protocol: 'K-LINE',
+        decodedData: 'KLINE_FRAME',
+        responseRaw: pkt.klineFrame?.rawHex || '',
+        durationMs: 0,
+        status: pkt.klineFrameResult.status === 0 ? 'SUCCESS' : 'ERROR'
+      });
+      if (this.klineFrameResolver) {
+        this.klineFrameResolver(pkt.klineFrameResult);
+      }
+    } else if (pkt.cmd === BinaryCommand.CMD_KLINE_STATUS_RESP && pkt.klineStatus) {
+      if (this.klineStatusResolver) {
+        this.klineStatusResolver(pkt.klineStatus);
       }
     }
   }

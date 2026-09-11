@@ -5,7 +5,8 @@
  * Enables seamless switching between Wi-Fi TCP and Bluetooth Classic SPP without changing diagnostic code.
  */
 
-import { ConnectionConfig, ConnectionStatus, CanFrame, CanBusStatus, TransportType, BluetoothDeviceInfo } from '../types';
+import { ConnectionConfig, ConnectionStatus, CanFrame, CanBusStatus, TransportType, BluetoothDeviceInfo, KlineStatus } from '../types';
+import { DecodedBinaryPacket } from './binaryProtocol';
 
 export interface PingResult {
   success: boolean;
@@ -37,12 +38,16 @@ export interface ITransport {
   
   sendRaw(data: Uint8Array | number[]): Promise<boolean>;
   sendCanFrame(canId: number, data: number[], isExtended?: boolean): Promise<boolean>;
+  sendKlineInit?(protocolId?: number): Promise<{ success: boolean; activeProtocol: number; keyByte1: number; keyByte2: number }>;
+  sendKlineFrame?(payload: number[]): Promise<{ status: number; data: number[] }>;
+  getKlineStatus?(): Promise<KlineStatus | null>;
   
   ping(): Promise<PingResult>;
   getCanStatus(): Promise<CanBusStatus | null>;
   
   onData(callback: (data: Uint8Array) => void): () => void;
   onCanFrame(callback: (frame: CanFrame) => void): () => void;
+  onKlinePacket?(callback: (pkt: DecodedBinaryPacket) => void): () => void;
   onStateChange(callback: (state: ConnectionStatus, error?: string) => void): () => void;
   
   scanDevices?(onDeviceFound?: (dev: BluetoothDeviceInfo) => void): Promise<BluetoothDeviceInfo[]>;

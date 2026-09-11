@@ -34,11 +34,30 @@ export type ProtocolType =
   | 'ISO 15765-4 (CAN 29/500)' 
   | 'ISO 15765-4 (CAN 11/250)' 
   | 'ISO 15765-4 (CAN 29/250)'
-  | 'ISO 14230-4 (KWP2000)'
+  | 'ISO 14230-4 (KWP2000 Fast)'
+  | 'ISO 14230-4 (KWP2000 Slow)'
   | 'ISO 9141-2'
   | 'SAE J1850 PWM'
   | 'SAE J1850 VPW'
   | 'AUTO';
+
+export type KlineErrorCode = 
+  | 'KLINE_OK'
+  | 'NO_KLINE_VOLTAGE'
+  | 'INIT_FAILED'
+  | 'NO_ECU_RESPONSE'
+  | 'CHECKSUM_ERROR'
+  | 'TIMEOUT';
+
+export interface KlineStatus {
+  voltageOk: boolean;
+  activeProtocol: ProtocolType;
+  initialized: boolean;
+  keyBytes?: [number, number];
+  rxErrorCount: number;
+  txErrorCount: number;
+  lastErrorCode: KlineErrorCode;
+}
 
 export type CanSpeed = '125K' | '250K' | '500K' | '1M';
 export type CanIdType = '11-bit' | '29-bit';

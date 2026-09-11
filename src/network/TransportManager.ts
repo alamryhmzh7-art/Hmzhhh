@@ -268,17 +268,52 @@ export class TransportManager {
   }
 
   /**
+   * Check if current configured protocol is a K-Line protocol (ISO 9141-2 / KWP2000)
+   */
+  public isKlineProtocol(): boolean {
+    return this.config.protocol.includes('ISO 9141') || this.config.protocol.includes('KWP2000');
+  }
+
+  /**
+   * Initialize K-Line bus on ESP32 (ISO 9141-2 5-baud or ISO 14230 KWP2000 Fast)
+   */
+  public async initKline(protocolId?: number): Promise<{ success: boolean; activeProtocol: number; keyByte1: number; keyByte2: number }> {
+    return this.activeTransport.sendKlineInit(protocolId);
+  }
+
+  public async sendKlineInit(protocolId?: number): Promise<{ success: boolean; activeProtocol: number; keyByte1: number; keyByte2: number }> {
+    return this.initKline(protocolId);
+  }
+
+  public async sendKlineFrame(payload: number[]): Promise<{ status: number; data: number[] }> {
+    return this.activeTransport.sendKlineFrame(payload);
+  }
+
+  /**
+   * Get live K-Line state and error counters from ESP32
+   */
+  public async getKlineStatus(): Promise<any | null> {
+    return this.activeTransport.getKlineStatus();
+  }
+
+  /**
    * Verifies if the car's computers (ECUs) are actually responding to requests.
-   * Sends a functional broadcast (01 00) and waits for any response in the 0x7E8-0x7EF range.
+   * Sends a functional broadcast (01 00) and waits for any response in CAN or K-Line.
    */
   public async checkCarEcuLink(): Promise<boolean> {
     if (!this.isConnected()) return false;
     
     try {
-      // 01 00 = OBD-II Mode 1, PID 00 (Supported PIDs 01-20)
-      // This is a standard functional broadcast request.
-      
-      // Try current config first
+      if (this.isKlineProtocol()) {
+        console.log(`[TM] Checking ECU Link on K-Line protocol (${this.config.protocol})...`);
+        const klineResp = await this.activeTransport.sendKlineFrame?.([0x01, 0x00]);
+        if (klineResp && klineResp.status === 0 && klineResp.data.length > 0) {
+          console.log(`[TM] K-Line ECU Link SUCCESS:`, klineResp.data);
+          return true;
+        }
+      }
+
+      // Try CAN standard mode first
       const is29Bit = this.config.canMode === '29-bit';
       const targetId = is29Bit ? '0x18DB33F1' : '0x7DF';
       
@@ -290,15 +325,24 @@ export class TransportManager {
         return true;
       }
 
-      // If failed and we are in AUTO/Unknown mode, try the other bit-width
+      // If failed and we are in AUTO/Unknown mode, try fallback
       const fallbackId = is29Bit ? '0x7DF' : '0x18DB33F1';
       console.log(`[TM] ECU Link failed with ${targetId}. Trying fallback ${fallbackId}...`);
       const fallbackResponse = await this.sendRequest([0x01, 0x00], fallbackId);
 
       if (fallbackResponse.status === 'SUCCESS' || fallbackResponse.status === 'NRC') {
         console.log(`[TM] ECU Link SUCCESS with fallback ${fallbackId}. Updating canMode...`);
-        // Optionally update config if fallback worked
         this.updateConfig({ canMode: is29Bit ? '11-bit' : '29-bit' });
+        return true;
+      }
+
+      // Try K-Line auto-init fallback if CAN gave no response
+      console.log(`[TM] CAN ECU link failed. Trying K-Line auto-init fallback...`);
+      const klineInit = await this.initKline(0x00);
+      if (klineInit.success) {
+        console.log(`[TM] K-Line Auto-Init SUCCESS! Protocol 0x${klineInit.activeProtocol.toString(16)}`);
+        const newProto = klineInit.activeProtocol === 0x06 ? 'ISO 14230-4 (KWP2000 Fast)' : 'ISO 9141-2';
+        this.updateConfig({ protocol: newProto });
         return true;
       }
       
@@ -660,6 +704,49 @@ export class TransportManager {
       });
       AppLogger.warn('NETWORK', 'RealModeCheck', `[${correlationId}] Command blocked: ESP32 NOT CONNECTED`, 'تم حظر الأمر: ESP32 غير متصل');
       return errPkt;
+    }
+
+    // K-Line Protocol Execution Route
+    if (this.isKlineProtocol()) {
+      if (!this.activeTransport.sendKlineFrame) {
+        throw new Error('K-Line protocol requested but active transport does not support K-Line');
+      }
+
+      console.log(`[KLINE-TX] [${correlationId}] PAYLOAD=[${reqHex}] PROTOCOL=${this.config.protocol}`);
+      const klineResult = await this.activeTransport.sendKlineFrame(requestBytes);
+      const durationMs = Math.round(performance.now() - startTime);
+
+      if (klineResult.status === 0 && klineResult.data.length > 0) {
+        const resHex = klineResult.data.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+        console.log(`[KLINE-RX] [${correlationId}] PAYLOAD=[${resHex}] (${durationMs}ms)`);
+
+        const pkt = commLogger.logPacket({
+          direction: '[KLINE-RX]',
+          protocol: this.config.protocol,
+          canIdHex: 'K-LINE',
+          requestRaw: reqHex,
+          responseRaw: resHex,
+          durationMs,
+          status: klineResult.data[0] === 0x7F ? 'NRC' : 'SUCCESS'
+        });
+
+        return { ...pkt, data: klineResult.data, auditFrames: [] };
+      } else {
+        const errStr = klineResult.status === 0x01 ? 'NO_VOLTAGE' :
+                       klineResult.status === 0x04 ? 'ECU_NO_RESPONSE' :
+                       klineResult.status === 0x05 ? 'CHECKSUM_ERROR' : 'KLINE_TX_ERROR';
+        console.warn(`[KLINE-ERR] [${correlationId}] Status=0x${klineResult.status.toString(16)} (${errStr})`);
+
+        return commLogger.logPacket({
+          direction: '[KLINE-ERR]',
+          protocol: this.config.protocol,
+          canIdHex: 'K-LINE',
+          requestRaw: reqHex,
+          error: errStr,
+          durationMs,
+          status: 'TIMEOUT'
+        });
+      }
     }
 
     try {
