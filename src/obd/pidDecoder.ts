@@ -1,5 +1,13 @@
 import { ObdPid } from '../types';
 
+function extractDataBytes(bytes: number[]): number[] {
+  if (!bytes || bytes.length === 0) return [];
+  if (bytes.length >= 2 && bytes[0] === 0x41) {
+    return bytes.slice(2);
+  }
+  return bytes;
+}
+
 export const standardPids: ObdPid[] = [
   {
     id: '0C',
@@ -17,8 +25,9 @@ export const standardPids: ObdPid[] = [
     category: 'engine',
     history: [],
     decode: (bytes: number[]) => {
-      if (bytes.length < 2) return 0;
-      return Math.round(((bytes[0] * 256) + bytes[1]) / 4);
+      const data = extractDataBytes(bytes);
+      if (data.length < 2) return 0;
+      return Math.round(((data[0] * 256) + data[1]) / 4);
     }
   },
   {
@@ -37,8 +46,9 @@ export const standardPids: ObdPid[] = [
     category: 'speed',
     history: [],
     decode: (bytes: number[]) => {
-      if (bytes.length < 1) return 0;
-      return bytes[0];
+      const data = extractDataBytes(bytes);
+      if (data.length < 1) return 0;
+      return data[0];
     }
   },
   {
@@ -57,8 +67,9 @@ export const standardPids: ObdPid[] = [
     category: 'temperature',
     history: [],
     decode: (bytes: number[]) => {
-      if (bytes.length < 1) return 0;
-      return bytes[0] - 40;
+      const data = extractDataBytes(bytes);
+      if (data.length < 1) return 0;
+      return data[0] - 40;
     }
   },
   {
@@ -77,8 +88,9 @@ export const standardPids: ObdPid[] = [
     category: 'engine',
     history: [],
     decode: (bytes: number[]) => {
-      if (bytes.length < 1) return 0;
-      return Math.round((bytes[0] * 100) / 255);
+      const data = extractDataBytes(bytes);
+      if (data.length < 1) return 0;
+      return Math.round((data[0] * 100) / 255);
     }
   },
   {
@@ -97,8 +109,9 @@ export const standardPids: ObdPid[] = [
     category: 'engine',
     history: [],
     decode: (bytes: number[]) => {
-      if (bytes.length < 1) return 0;
-      return Math.round((bytes[0] * 100) / 255);
+      const data = extractDataBytes(bytes);
+      if (data.length < 1) return 0;
+      return Math.round((data[0] * 100) / 255);
     }
   },
   {
@@ -117,8 +130,9 @@ export const standardPids: ObdPid[] = [
     category: 'fuel',
     history: [],
     decode: (bytes: number[]) => {
-      if (bytes.length < 1) return 0;
-      return bytes[0] * 3;
+      const data = extractDataBytes(bytes);
+      if (data.length < 1) return 0;
+      return data[0] * 3;
     }
   },
   {
@@ -137,8 +151,9 @@ export const standardPids: ObdPid[] = [
     category: 'temperature',
     history: [],
     decode: (bytes: number[]) => {
-      if (bytes.length < 1) return 0;
-      return bytes[0] - 40;
+      const data = extractDataBytes(bytes);
+      if (data.length < 1) return 0;
+      return data[0] - 40;
     }
   },
   {
@@ -157,8 +172,9 @@ export const standardPids: ObdPid[] = [
     category: 'air',
     history: [],
     decode: (bytes: number[]) => {
-      if (bytes.length < 2) return 0;
-      return parseFloat((((bytes[0] * 256) + bytes[1]) / 100).toFixed(2));
+      const data = extractDataBytes(bytes);
+      if (data.length < 2) return 0;
+      return parseFloat((((data[0] * 256) + data[1]) / 100).toFixed(2));
     }
   },
   {
@@ -177,8 +193,9 @@ export const standardPids: ObdPid[] = [
     category: 'fuel',
     history: [],
     decode: (bytes: number[]) => {
-      if (bytes.length < 1) return 0;
-      return parseFloat(((bytes[0] - 128) * (100 / 128)).toFixed(1));
+      const data = extractDataBytes(bytes);
+      if (data.length < 1) return 0;
+      return parseFloat(((data[0] - 128) * (100 / 128)).toFixed(1));
     }
   },
   {
@@ -197,8 +214,9 @@ export const standardPids: ObdPid[] = [
     category: 'fuel',
     history: [],
     decode: (bytes: number[]) => {
-      if (bytes.length < 1) return 0;
-      return parseFloat(((bytes[0] - 128) * (100 / 128)).toFixed(1));
+      const data = extractDataBytes(bytes);
+      if (data.length < 1) return 0;
+      return parseFloat(((data[0] - 128) * (100 / 128)).toFixed(1));
     }
   },
   {
@@ -217,8 +235,9 @@ export const standardPids: ObdPid[] = [
     category: 'engine',
     history: [],
     decode: (bytes: number[]) => {
-      if (bytes.length < 1) return 0;
-      return parseFloat(((bytes[0] - 128) / 2).toFixed(1));
+      const data = extractDataBytes(bytes);
+      if (data.length < 1) return 0;
+      return parseFloat(((data[0] - 128) / 2).toFixed(1));
     }
   },
   {
@@ -237,8 +256,9 @@ export const standardPids: ObdPid[] = [
     category: 'electrical',
     history: [],
     decode: (bytes: number[]) => {
-      if (bytes.length < 2) return 0;
-      return parseFloat((((bytes[0] * 256) + bytes[1]) / 1000).toFixed(2));
+      const data = extractDataBytes(bytes);
+      if (data.length < 2) return 0;
+      return parseFloat((((data[0] * 256) + data[1]) / 1000).toFixed(2));
     }
   },
   {
@@ -257,8 +277,9 @@ export const standardPids: ObdPid[] = [
     category: 'fuel',
     history: [],
     decode: (bytes: number[]) => {
-      if (bytes.length < 1) return 0;
-      return Math.round((bytes[0] * 100) / 255);
+      const data = extractDataBytes(bytes);
+      if (data.length < 1) return 0;
+      return Math.round((data[0] * 100) / 255);
     }
   },
   {
@@ -277,8 +298,9 @@ export const standardPids: ObdPid[] = [
     category: 'engine',
     history: [],
     decode: (bytes: number[]) => {
-      if (bytes.length < 2) return 0;
-      return (bytes[0] * 256) + bytes[1];
+      const data = extractDataBytes(bytes);
+      if (data.length < 2) return 0;
+      return (data[0] * 256) + data[1];
     }
   },
   {
@@ -297,8 +319,9 @@ export const standardPids: ObdPid[] = [
     category: 'air',
     history: [],
     decode: (bytes: number[]) => {
-      if (bytes.length < 1) return 0;
-      return bytes[0];
+      const data = extractDataBytes(bytes);
+      if (data.length < 1) return 0;
+      return data[0];
     }
   },
   {
@@ -317,8 +340,9 @@ export const standardPids: ObdPid[] = [
     category: 'temperature',
     history: [],
     decode: (bytes: number[]) => {
-      if (bytes.length < 1) return 0;
-      return bytes[0] - 40;
+      const data = extractDataBytes(bytes);
+      if (data.length < 1) return 0;
+      return data[0] - 40;
     }
   },
   {
@@ -337,8 +361,9 @@ export const standardPids: ObdPid[] = [
     category: 'fuel',
     history: [],
     decode: (bytes: number[]) => {
-      if (bytes.length < 1) return 0;
-      return parseFloat((bytes[0] / 200).toFixed(3));
+      const data = extractDataBytes(bytes);
+      if (data.length < 1) return 0;
+      return parseFloat((data[0] / 200).toFixed(3));
     }
   },
   {
@@ -357,8 +382,9 @@ export const standardPids: ObdPid[] = [
     category: 'fuel',
     history: [],
     decode: (bytes: number[]) => {
-      if (bytes.length < 2) return 0;
-      return parseFloat(((((bytes[0] * 256) + bytes[1]) / 128) - 210).toFixed(2));
+      const data = extractDataBytes(bytes);
+      if (data.length < 2) return 0;
+      return parseFloat(((((data[0] * 256) + data[1]) / 128) - 210).toFixed(2));
     }
   },
   {
@@ -377,26 +403,30 @@ export const standardPids: ObdPid[] = [
     category: 'fuel',
     history: [],
     decode: (bytes: number[]) => {
-      if (bytes.length < 2) return 0;
-      return parseFloat((((bytes[0] * 256) + bytes[1]) * 0.079).toFixed(1));
+      const data = extractDataBytes(bytes);
+      if (data.length < 2) return 0;
+      return parseFloat((((data[0] * 256) + data[1]) * 0.079).toFixed(1));
     }
   }
 ];
 
 export class ObdPidDecoder {
   public static decodeRpm(bytes: number[]): number {
-    if (bytes.length < 2) return 0;
-    return Math.round(((bytes[0] * 256) + bytes[1]) / 4);
+    const data = extractDataBytes(bytes);
+    if (data.length < 2) return 0;
+    return Math.round(((data[0] * 256) + data[1]) / 4);
   }
 
   public static decodeSpeed(bytes: number[]): number {
-    if (bytes.length < 1) return 0;
-    return bytes[0];
+    const data = extractDataBytes(bytes);
+    if (data.length < 1) return 0;
+    return data[0];
   }
 
   public static decodeVoltage(bytes: number[]): number {
-    if (bytes.length < 2) return 0;
-    return parseFloat((((bytes[0] * 256) + bytes[1]) / 1000).toFixed(2));
+    const data = extractDataBytes(bytes);
+    if (data.length < 2) return 0;
+    return parseFloat((((data[0] * 256) + data[1]) / 1000).toFixed(2));
   }
 
   public static decodeResponse(pidHex: string, rawBytes: number[]): number | null {

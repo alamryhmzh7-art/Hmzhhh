@@ -67,14 +67,8 @@ export const DtcView: React.FC<DtcViewProps> = ({
         throw new Error('NOT_CONNECTED');
       }
 
-      setScanStep(isRtl ? 'جاري طلب أكواد الأعطال المخزنة (Mode 03)...' : 'Requesting stored DTCs (Mode 03)...');
+      setScanStep(isRtl ? 'جاري طلب أكواد الأعطال المخزنة والمعلقة (Mode 03 & 07 & 0A)...' : 'Querying Stored, Pending & Permanent DTCs (Mode 03, 07, 0A)...');
       setScanProgress(30);
-
-      // Send Mode 03 (Request Stored DTCs) via transportManager
-      const resp = await transportManager.sendRequest([0x03], '0x7DF');
-      
-      setScanProgress(70);
-      setScanStep(isRtl ? 'جاري معالجة استجابة ECU...' : 'Processing ECU response...');
 
       if (isMockMode) {
         await new Promise(r => setTimeout(r, 800));
@@ -84,41 +78,85 @@ export const DtcView: React.FC<DtcViewProps> = ({
         return;
       }
 
-      if (resp.status === 'SUCCESS' && resp.responseRaw) {
-        const bytes = resp.responseRaw.split(' ').map(b => parseInt(b, 16));
-        // Mode 03 response: [0x43, numberOfCodes, code1_H, code1_L, ...]
-        let dtcBytes: number[] = [];
-        if (bytes[0] === 0x43) {
-          dtcBytes = bytes.slice(2);
-        } else if (bytes.length > 0) {
-          dtcBytes = bytes;
+      const allDtcResults: DiagnosticTroubleCode[] = [];
+
+      // 1. Query Mode 03 (Stored DTCs)
+      try {
+        const resp03 = await transportManager.sendRequest([0x03], '0x7DF');
+        if (resp03.status === 'SUCCESS' && resp03.responseRaw) {
+          const bytes = resp03.responseRaw.split(' ').map(b => parseInt(b, 16));
+          let dtcBytes: number[] = [];
+          if (bytes[0] === 0x43) dtcBytes = bytes.slice(2);
+          else dtcBytes = bytes;
+          const dtcs = DtcDecoder.parseDtcList(dtcBytes, 'CONFIRMED');
+          allDtcResults.push(...dtcs);
         }
+      } catch (e) {
+        console.warn('Mode 03 read warning:', e);
+      }
 
-        const results = DtcDecoder.parseDtcList(dtcBytes, 'CONFIRMED');
-        setDtcList(results);
-        setScanProgress(100);
+      setScanProgress(60);
 
-        if (user) {
-          saveDiagnosticReport({
-            id: `scan_${Date.now()}`,
-            rawVin: vinInfo?.rawVin || 'UNKNOWN_VIN',
-            manufacturer: vinInfo?.manufacturer || 'Generic',
-            model: vinInfo?.model || 'OBD-II Vehicle',
-            year: vinInfo?.year || new Date().getFullYear(),
-            country: vinInfo?.country || 'Unknown',
-            batteryVoltage: batteryVoltage || 12.0,
-            dtcCodes: results.map(d => d.code),
-            status: 'Completed'
-          }).catch(err => {
-            console.error("Failed to save scan to cloud history:", err);
+      // 2. Query Mode 07 (Pending DTCs)
+      try {
+        const resp07 = await transportManager.sendRequest([0x07], '0x7DF');
+        if (resp07.status === 'SUCCESS' && resp07.responseRaw) {
+          const bytes = resp07.responseRaw.split(' ').map(b => parseInt(b, 16));
+          let dtcBytes: number[] = [];
+          if (bytes[0] === 0x47) dtcBytes = bytes.slice(2);
+          else dtcBytes = bytes;
+          const dtcs = DtcDecoder.parseDtcList(dtcBytes, 'PENDING');
+          // Deduplicate
+          dtcs.forEach(d => {
+            if (!allDtcResults.some(existing => existing.code === d.code)) {
+              allDtcResults.push(d);
+            }
           });
         }
-      } else {
-        setDtcList([]);
-        setConnectionError(isRtl
-          ? 'لم تستجب وحدة التحكم لأمر قراءة الأعطال (Mode 03). تأكد من تشغيل مفتاح السيارة (Ignition ON) وسلامة ناقل CAN.'
-          : 'ECU did not respond to Mode 03 request (Timeout). Verify vehicle Ignition is ON and CAN wiring is secure.'
-        );
+      } catch (e) {
+        console.warn('Mode 07 read warning:', e);
+      }
+
+      setScanProgress(80);
+
+      // 3. Query Mode 0A (Permanent DTCs)
+      try {
+        const resp0A = await transportManager.sendRequest([0x0A], '0x7DF');
+        if (resp0A.status === 'SUCCESS' && resp0A.responseRaw) {
+          const bytes = resp0A.responseRaw.split(' ').map(b => parseInt(b, 16));
+          let dtcBytes: number[] = [];
+          if (bytes[0] === 0x4A) dtcBytes = bytes.slice(2);
+          else dtcBytes = bytes;
+          const dtcs = DtcDecoder.parseDtcList(dtcBytes, 'PERMANENT');
+          dtcs.forEach(d => {
+            if (!allDtcResults.some(existing => existing.code === d.code)) {
+              allDtcResults.push(d);
+            }
+          });
+        }
+      } catch (e) {
+        console.warn('Mode 0A read warning:', e);
+      }
+
+      setScanProgress(100);
+      setDtcList(allDtcResults);
+
+      if (allDtcResults.length === 0) {
+        setClearSuccessMessage(isRtl ? 'تم فحص جميع الأنظمة: لا توجد أكواد أعطال مسجلة في السيارة.' : 'All modes checked: No diagnostic trouble codes detected in ECU.');
+      } else if (user) {
+        saveDiagnosticReport({
+          id: `scan_${Date.now()}`,
+          rawVin: vinInfo?.rawVin || 'UNKNOWN_VIN',
+          manufacturer: vinInfo?.manufacturer || 'Generic',
+          model: vinInfo?.model || 'OBD-II Vehicle',
+          year: vinInfo?.year || new Date().getFullYear(),
+          country: vinInfo?.country || 'Unknown',
+          batteryVoltage: batteryVoltage || 12.0,
+          dtcCodes: allDtcResults.map(d => d.code),
+          status: 'Completed'
+        }).catch(err => {
+          console.error("Failed to save scan to cloud history:", err);
+        });
       }
     } catch (err: any) {
       setDtcList([]);

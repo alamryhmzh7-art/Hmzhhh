@@ -616,11 +616,60 @@ export class BluetoothSppTransport implements ITransport {
     const { packets, remainingBuffer } = BinaryProtocol.parseStream(this.rxBuffer);
     this.rxBuffer = remainingBuffer;
 
-    packets.forEach(pkt => {
-      const pktHex = Array.from(pkt.rawFrame).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
-      console.log(`[BT-RX-FRAME] CMD=0x${pkt.cmd.toString(16).toUpperCase()} LEN=${pkt.payload.length} HEX=[${pktHex}]`);
-      this.processDecodedPacket(pkt);
-    });
+    if (packets.length > 0) {
+      packets.forEach(pkt => {
+        const pktHex = Array.from(pkt.rawFrame).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+        console.log(`[BT-RX-FRAME] CMD=0x${pkt.cmd.toString(16).toUpperCase()} LEN=${pkt.payload.length} HEX=[${pktHex}]`);
+        this.processDecodedPacket(pkt);
+      });
+    } else if (this.rxBuffer.length > 0) {
+      this.checkAndParseAsciiLines();
+    }
+  }
+
+  private checkAndParseAsciiLines() {
+    if (this.rxBuffer.length === 0) return;
+    let str = '';
+    for (let i = 0; i < this.rxBuffer.length; i++) {
+      str += String.fromCharCode(this.rxBuffer[i]);
+    }
+
+    if (str.includes('\r') || str.includes('\n') || str.includes('>')) {
+      const lines = str.split(/[\r\n>]+/);
+      const endsWithDelim = str.endsWith('\r') || str.endsWith('\n') || str.endsWith('>');
+      
+      for (let i = 0; i < lines.length - (endsWithDelim ? 0 : 1); i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+
+        const cleanHex = line.replace(/[^0-9A-Fa-f]/g, '');
+        if (cleanHex.length >= 4 && cleanHex.length % 2 === 0) {
+          const hexBytes: number[] = [];
+          for (let k = 0; k < cleanHex.length; k += 2) {
+            hexBytes.push(parseInt(cleanHex.substring(k, k + 2), 16));
+          }
+
+          const modeByte = hexBytes[0];
+          if (modeByte === 0x41 || modeByte === 0x43 || modeByte === 0x47 || modeByte === 0x4A || modeByte === 0x44 || modeByte === 0x59 || modeByte === 0x7F) {
+            const frame: CanFrame = {
+              id: '0x7E8',
+              dlc: hexBytes.length,
+              dataHex: hexBytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' '),
+              dataBytes: hexBytes,
+              direction: 'Rx',
+              isExtended: false
+            };
+            console.log(`[ELM-BT-ASCII-RX] Line: "${line}" -> CAN DATA: [${frame.dataHex}]`);
+            canManager.addFrame(frame);
+            this.canFrameListeners.forEach(l => l(frame));
+          }
+        }
+      }
+
+      if (endsWithDelim) {
+        this.rxBuffer = new Uint8Array(0);
+      }
+    }
   }
 
   public onKlinePacket(callback: (pkt: DecodedBinaryPacket) => void): () => void {
