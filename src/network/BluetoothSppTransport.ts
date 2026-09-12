@@ -4,17 +4,13 @@
  * Real Bluetooth Classic SPP transport for the ESP32 OBD adapter.
  *
  * Responsibilities:
- * - Connect/disconnect Bluetooth SPP
- * - Send/receive binary transport frames
- * - Parse incoming BinaryProtocol frames
+ * - Connect/disconnect Bluetooth Classic SPP
+ * - Send/receive raw binary transport bytes
+ * - Parse BinaryProtocol stream frames
  * - Forward decoded CAN frames to diagnostic layers
- * - Handle ping/CAN-status/K-Line responses
+ * - Handle Ping / CAN Status / K-Line responses
  *
- * IMPORTANT ARCHITECTURE RULE:
- *
- * This transport MUST NOT write directly to canManager.
- *
- * Correct path:
+ * IMPORTANT ARCHITECTURE:
  *
  * ESP32
  *   ↓
@@ -28,10 +24,13 @@
  *   ↓
  * canManager
  *   ↓
- * UI / diagnostics
+ * Diagnostics / UI
  *
- * Diagnostic decoding (OBD-II / ISO-TP / UDS) remains outside
- * this transport layer.
+ * This transport MUST NOT write directly to canManager.
+ *
+ * Native Bluetooth plugin is transport-only.
+ * No CAN / UDS / OBD / K-Line protocol decoding belongs
+ * inside BluetoothSppPlugin.java.
  */
 
 import {
@@ -71,7 +70,7 @@ import {
 } from '@capacitor/core';
 
 console.log(
-  '[BUILD-ID] BT-TRANSPORT-AUDITED-V6-20260912'
+  '[BUILD-ID] BT-TRANSPORT-FIXED-V7-20260912'
 );
 
 export class BluetoothSppTransport implements ITransport {
@@ -87,29 +86,24 @@ export class BluetoothSppTransport implements ITransport {
   private rawState: string =
     'DISCONNECTED';
 
-  private lastError: Error | null = null;
+  private lastError: Error | null =
+    null;
 
   private lastErrorStackTrace:
-    string | null = null;
+    string | null =
+    null;
 
   /**
-   * Binary protocol RX stream buffer.
+   * BinaryProtocol stream buffer.
    *
-   * Bluetooth SPP is a stream.
+   * Bluetooth SPP is a byte stream.
    *
-   * One packet may arrive in several chunks,
-   * or several packets may arrive in one chunk.
+   * One BinaryProtocol packet can arrive in several
+   * Bluetooth chunks, or several packets can arrive
+   * in one chunk.
    */
   private rxBuffer: Uint8Array =
     new Uint8Array(0);
-
-  /**
-   * Legacy ASCII ELM buffer.
-   *
-   * This buffer is intentionally isolated from
-   * the BinaryProtocol RX buffer.
-   */
-  private asciiRxBuffer: string = '';
 
   /**
    * Web Serial resources.
@@ -119,9 +113,15 @@ export class BluetoothSppTransport implements ITransport {
   private writer: any = null;
 
   /**
-   * Native Bluetooth listener handles.
+   * Native Bluetooth listeners.
+   *
+   * IMPORTANT:
+   *
+   * These listeners are installed BEFORE native connect()
+   * so that the first ESP32 response cannot be lost.
    */
   private nativeDataListener: any = null;
+
   private nativeDisconnectListener: any = null;
 
   /**
@@ -131,35 +131,35 @@ export class BluetoothSppTransport implements ITransport {
   private isScanning = false;
 
   /**
-   * Connection/session generation.
+   * Physical connection generation.
    *
-   * Every physical connection gets a new generation.
+   * Every connection gets a unique generation.
    *
-   * This prevents a delayed write from an old Bluetooth
-   * session from being transmitted after reconnecting.
+   * Any callback/write belonging to an old generation
+   * is rejected after disconnect/reconnect.
    */
   private connectionGeneration = 0;
 
   /**
-   * Serialize physical writes.
+   * Serialize all physical writes.
    *
-   * Bluetooth SPP is a byte stream.
-   * Concurrent writes must never race.
+   * SPP is a byte stream and concurrent writes must not
+   * overlap.
    */
   private writeQueue:
-    Promise<void> = Promise.resolve();
+    Promise<void> =
+    Promise.resolve();
 
   /**
-   * High-rate raw traffic logging is disabled.
-   *
-   * Logging every CAN packet can freeze a WebView.
+   * High-rate traffic logging is disabled by default.
    */
   private readonly debugRawTraffic =
     false;
 
-  /**
-   * Application listeners.
-   */
+  // ===========================================================================
+  // LISTENERS
+  // ===========================================================================
+
   private stateListeners:
     Array<
       (
@@ -183,15 +183,17 @@ export class BluetoothSppTransport implements ITransport {
       (pkt: DecodedBinaryPacket) => void
     > = [];
 
-  /**
-   * Outstanding request resolvers.
-   */
+  // ===========================================================================
+  // PENDING REQUESTS
+  // ===========================================================================
+
   private pingResolver:
     ((res: PingResult) => void) | null =
     null;
 
   private pingStartTime:
-    number | null = null;
+    number | null =
+    null;
 
   private pingTimeoutHandle:
     ReturnType<typeof setTimeout> | null =
@@ -420,11 +422,11 @@ export class BluetoothSppTransport implements ITransport {
      */
     this.connectionGeneration++;
 
+    const connectGeneration =
+      this.connectionGeneration;
+
     this.rxBuffer =
       new Uint8Array(0);
-
-    this.asciiRxBuffer =
-      '';
 
     this.setStatus(
       'CONNECTING'
@@ -432,9 +434,9 @@ export class BluetoothSppTransport implements ITransport {
 
     try {
 
-      // -----------------------------------------------------------------------
+      // =======================================================================
       // MOCK
-      // -----------------------------------------------------------------------
+      // =======================================================================
 
       if (
         this.config.isMockMode
@@ -452,6 +454,13 @@ export class BluetoothSppTransport implements ITransport {
             )
         );
 
+        if (
+          connectGeneration !==
+          this.connectionGeneration
+        ) {
+          return false;
+        }
+
         mockEcuServer.start();
 
         this.rawState =
@@ -464,12 +473,16 @@ export class BluetoothSppTransport implements ITransport {
         return true;
       }
 
-      // -----------------------------------------------------------------------
-      // WEB / SERIAL
-      // -----------------------------------------------------------------------
+      // =======================================================================
+      // RUNTIME
+      // =======================================================================
 
       const isNative =
         Capacitor.isNativePlatform();
+
+      // =======================================================================
+      // WEB SERIAL
+      // =======================================================================
 
       if (!isNative) {
 
@@ -496,6 +509,20 @@ export class BluetoothSppTransport implements ITransport {
         await port.open({
           baudRate: 115200
         });
+
+        if (
+          connectGeneration !==
+          this.connectionGeneration
+        ) {
+
+          try {
+            await port.close();
+          } catch {}
+
+          throw new Error(
+            'Serial connection became stale'
+          );
+        }
 
         this.serialPort =
           port;
@@ -524,9 +551,9 @@ export class BluetoothSppTransport implements ITransport {
         return true;
       }
 
-      // -----------------------------------------------------------------------
-      // NATIVE ANDROID BLUETOOTH SPP
-      // -----------------------------------------------------------------------
+      // =======================================================================
+      // NATIVE ANDROID BLUETOOTH CLASSIC SPP
+      // =======================================================================
 
       const targetMac =
         (
@@ -548,15 +575,44 @@ export class BluetoothSppTransport implements ITransport {
         `[BT-CONNECT] START address=${targetMac}`
       );
 
+      /**
+       * CRITICAL FIX:
+       *
+       * Install native listeners BEFORE connect().
+       *
+       * The ESP32 can send its first BinaryProtocol packet
+       * immediately after RFCOMM connection.
+       */
+      await this.installNativeBtListeners(
+        connectGeneration
+      );
+
+      /**
+       * Now establish the physical Bluetooth connection.
+       */
       await BluetoothSpp.connect({
         address: targetMac
       });
 
+      /**
+       * If a disconnect happened while connect() was awaiting,
+       * the generation will have changed.
+       *
+       * Never resurrect a dead connection.
+       */
+      if (
+        connectGeneration !==
+        this.connectionGeneration
+      ) {
+
+        throw new Error(
+          'Bluetooth disconnected during connection establishment'
+        );
+      }
+
       console.log(
         '[BT-CONNECT] SPP CONNECTED'
       );
-
-      await this.startNativeBtReadLoop();
 
       this.rawState =
         'CONNECTED';
@@ -603,6 +659,10 @@ export class BluetoothSppTransport implements ITransport {
         err
       );
 
+      /**
+       * Do not allow old listeners/resources to survive
+       * a failed connection attempt.
+       */
       await this.cleanupConnectionResources(
         true
       );
@@ -944,8 +1004,7 @@ export class BluetoothSppTransport implements ITransport {
       false;
 
     /**
-     * Invalidate every queued physical write belonging
-     * to the current session.
+     * Invalidate current session immediately.
      */
     this.connectionGeneration++;
 
@@ -956,9 +1015,6 @@ export class BluetoothSppTransport implements ITransport {
     this.rxBuffer =
       new Uint8Array(0);
 
-    this.asciiRxBuffer =
-      '';
-
     this.rawState =
       'DISCONNECTED';
 
@@ -967,12 +1023,18 @@ export class BluetoothSppTransport implements ITransport {
     );
   }
 
+  // ===========================================================================
+  // RESOURCE CLEANUP
+  // ===========================================================================
+
   /**
-   * Clean resources.
-   *
    * disconnectNative:
-   * true  = explicitly disconnect native Bluetooth.
-   * false = native side already disconnected.
+   *
+   * true:
+   *   JavaScript explicitly requested disconnect.
+   *
+   * false:
+   *   Native plugin already reported the disconnect.
    */
   private async cleanupConnectionResources(
     disconnectNative = true
@@ -997,7 +1059,7 @@ export class BluetoothSppTransport implements ITransport {
       null;
 
     // -------------------------------------------------------------------------
-    // Web Serial
+    // Web Serial reader
     // -------------------------------------------------------------------------
 
     if (this.reader) {
@@ -1013,6 +1075,10 @@ export class BluetoothSppTransport implements ITransport {
       this.reader = null;
     }
 
+    // -------------------------------------------------------------------------
+    // Web Serial writer
+    // -------------------------------------------------------------------------
+
     if (this.writer) {
 
       try {
@@ -1021,6 +1087,10 @@ export class BluetoothSppTransport implements ITransport {
 
       this.writer = null;
     }
+
+    // -------------------------------------------------------------------------
+    // Web Serial port
+    // -------------------------------------------------------------------------
 
     if (this.serialPort) {
 
@@ -1045,7 +1115,13 @@ export class BluetoothSppTransport implements ITransport {
         await BluetoothSpp
           .disconnect();
 
-      } catch {}
+      } catch (error) {
+
+        console.warn(
+          '[BT-CLEANUP] Native disconnect failed',
+          error
+        );
+      }
     }
 
     // -------------------------------------------------------------------------
@@ -1054,12 +1130,17 @@ export class BluetoothSppTransport implements ITransport {
 
     this.clearPendingResolvers();
 
-    /**
-     * Reset write chain.
-     */
+    // -------------------------------------------------------------------------
+    // Write queue
+    // -------------------------------------------------------------------------
+
     this.writeQueue =
       Promise.resolve();
   }
+
+  // ===========================================================================
+  // CLEAR PENDING REQUESTS
+  // ===========================================================================
 
   private clearPendingResolvers():
     void {
@@ -1268,8 +1349,7 @@ export class BluetoothSppTransport implements ITransport {
     }
 
     /**
-     * Capture the exact connection session that accepted
-     * this write.
+     * Capture exact connection session.
      */
     const operationGeneration =
       this.connectionGeneration;
@@ -1287,22 +1367,16 @@ export class BluetoothSppTransport implements ITransport {
         : '';
 
     /**
-     * Serialize the write.
+     * Serialize physical writes.
      */
     const operation =
       this.writeQueue.then(
         async () => {
 
-          /**
-           * Reject stale writes.
-           *
-           * Example:
-           *
-           * Session A queues write
-           * Session A disconnects
-           * Session B connects
-           * Old Session A write must NOT go through Session B.
-           */
+          // -------------------------------------------------------------------
+          // SESSION CHECK
+          // -------------------------------------------------------------------
+
           if (
             operationGeneration !==
             this.connectionGeneration
@@ -1346,6 +1420,23 @@ export class BluetoothSppTransport implements ITransport {
                 )
             });
 
+            /**
+             * A disconnect may have happened while the native
+             * write was awaiting.
+             *
+             * Do not report this old operation as a successful
+             * current-session write.
+             */
+            if (
+              operationGeneration !==
+              this.connectionGeneration
+            ) {
+
+              throw new Error(
+                'Bluetooth connection changed during write'
+              );
+            }
+
             return;
           }
 
@@ -1368,6 +1459,16 @@ export class BluetoothSppTransport implements ITransport {
               byteArr
             );
 
+            if (
+              operationGeneration !==
+              this.connectionGeneration
+            ) {
+
+              throw new Error(
+                'Serial connection changed during write'
+              );
+            }
+
             return;
           }
 
@@ -1378,7 +1479,7 @@ export class BluetoothSppTransport implements ITransport {
       );
 
     /**
-     * Never poison the queue with a rejected promise.
+     * Keep the queue usable after an error.
      */
     this.writeQueue =
       operation.then(
@@ -1404,7 +1505,7 @@ export class BluetoothSppTransport implements ITransport {
   }
 
   // ===========================================================================
-  // CAN
+  // CAN TX
   // ===========================================================================
 
   public async sendCanFrame(
@@ -1413,19 +1514,11 @@ export class BluetoothSppTransport implements ITransport {
     isExtended = false
   ): Promise<boolean> {
 
-    // -------------------------------------------------------------------------
-    // MOCK
-    // -------------------------------------------------------------------------
-
     if (
       this.config.isMockMode
     ) {
       return true;
     }
-
-    // -------------------------------------------------------------------------
-    // CONNECTION
-    // -------------------------------------------------------------------------
 
     if (
       !this.isConnected()
@@ -1434,7 +1527,7 @@ export class BluetoothSppTransport implements ITransport {
     }
 
     // -------------------------------------------------------------------------
-    // CAN ID
+    // CAN ID VALIDATION
     // -------------------------------------------------------------------------
 
     if (
@@ -1458,7 +1551,7 @@ export class BluetoothSppTransport implements ITransport {
     }
 
     // -------------------------------------------------------------------------
-    // DATA
+    // DATA VALIDATION
     // -------------------------------------------------------------------------
 
     if (
@@ -1502,12 +1595,7 @@ export class BluetoothSppTransport implements ITransport {
         );
 
       /**
-       * IMPORTANT:
-       *
-       * Do NOT call canManager.addFrame() here.
-       *
-       * TX should be recorded only by the central diagnostic
-       * / transport layer after the actual send policy is decided.
+       * Never call canManager here.
        */
       return await this.sendRaw(
         packet
@@ -1676,9 +1764,7 @@ export class BluetoothSppTransport implements ITransport {
         ).then(
           success => {
 
-            if (
-              success
-            ) {
+            if (success) {
               return;
             }
 
@@ -1703,20 +1789,17 @@ export class BluetoothSppTransport implements ITransport {
             this.pingStartTime =
               null;
 
-            if (resolver) {
-
-              resolver({
-                success: false,
-                latencyMs:
-                  Math.round(
-                    performance.now() -
-                    startTime
-                  ),
-                info:
-                  'Bluetooth Ping Write Failed',
-                txHex
-              });
-            }
+            resolver?.({
+              success: false,
+              latencyMs:
+                Math.round(
+                  performance.now() -
+                  startTime
+                ),
+              info:
+                'Bluetooth Ping Write Failed',
+              txHex
+            });
           }
         );
       }
@@ -1750,10 +1833,6 @@ export class BluetoothSppTransport implements ITransport {
         messagesReceived: 0
       };
     }
-
-    // -------------------------------------------------------------------------
-    // CONNECTION
-    // -------------------------------------------------------------------------
 
     if (
       !this.isConnected()
@@ -1818,9 +1897,7 @@ export class BluetoothSppTransport implements ITransport {
         ).then(
           success => {
 
-            if (
-              success
-            ) {
+            if (success) {
               return;
             }
 
@@ -1919,7 +1996,7 @@ export class BluetoothSppTransport implements ITransport {
     }
 
     // -------------------------------------------------------------------------
-    // BINARY STREAM
+    // BINARY STREAM BUFFER
     // -------------------------------------------------------------------------
 
     const merged =
@@ -1940,6 +2017,10 @@ export class BluetoothSppTransport implements ITransport {
 
     this.rxBuffer =
       merged;
+
+    // -------------------------------------------------------------------------
+    // BINARY PROTOCOL PARSER
+    // -------------------------------------------------------------------------
 
     const parsed =
       BinaryProtocol.parseStream(
@@ -1962,7 +2043,7 @@ export class BluetoothSppTransport implements ITransport {
       ) {
 
         console.warn(
-          '[BT-RX] Ignoring invalid binary packet'
+          '[BT-RX] Ignoring invalid BinaryProtocol packet'
         );
 
         continue;
@@ -1998,21 +2079,10 @@ export class BluetoothSppTransport implements ITransport {
         packet
       );
     }
-
-    /**
-     * DO NOT feed binary traffic into the ASCII parser.
-     *
-     * Binary payloads can legitimately contain:
-     * 0x0D
-     * 0x0A
-     * ASCII-looking bytes
-     *
-     * Mixing both parsers can corrupt stream framing.
-     */
   }
 
   // ===========================================================================
-  // NORMALIZE NATIVE DATA
+  // NORMALIZE RAW BYTES
   // ===========================================================================
 
   private normalizeIncomingBytes(
@@ -2070,17 +2140,19 @@ export class BluetoothSppTransport implements ITransport {
       );
     }
 
+    /**
+     * Native BluetoothSppPlugin is explicitly typed to emit
+     * number[].
+     *
+     * Therefore a string is NOT treated as Base64/hex here.
+     *
+     * This fallback only preserves raw character bytes for
+     * compatibility with possible non-native callers.
+     */
     if (
       typeof data === 'string'
     ) {
 
-      /**
-       * The plugin contract must determine whether
-       * a string is raw-byte data, Base64, or hex.
-       *
-       * We preserve the current raw-character behavior
-       * until BluetoothSppPlugin.ts is audited.
-       */
       const bytes =
         new Uint8Array(
           data.length
@@ -2101,186 +2173,6 @@ export class BluetoothSppTransport implements ITransport {
     }
 
     return new Uint8Array(0);
-  }
-
-  // ===========================================================================
-  // LEGACY ASCII API
-  // ===========================================================================
-
-  /**
-   * Legacy ELM-compatible ASCII parser.
-   *
-   * IMPORTANT:
-   *
-   * This parser does NOT write to canManager.
-   *
-   * If used, it only emits through canFrameListeners.
-   */
-  private checkAndParseAsciiLines(
-    text?: string
-  ): void {
-
-    if (
-      typeof text === 'string'
-    ) {
-
-      this.asciiRxBuffer +=
-        text;
-    }
-
-    if (
-      !this.asciiRxBuffer
-    ) {
-      return;
-    }
-
-    const hasTerminator =
-      this.asciiRxBuffer.includes('\r') ||
-      this.asciiRxBuffer.includes('\n') ||
-      this.asciiRxBuffer.includes('>');
-
-    if (!hasTerminator) {
-      return;
-    }
-
-    const lines =
-      this.asciiRxBuffer
-        .split(/[\r\n>]+/);
-
-    const terminated =
-      this.asciiRxBuffer.endsWith('\r') ||
-      this.asciiRxBuffer.endsWith('\n') ||
-      this.asciiRxBuffer.endsWith('>');
-
-    const limit =
-      terminated
-        ? lines.length
-        : lines.length - 1;
-
-    for (
-      let i = 0;
-      i < limit;
-      i++
-    ) {
-
-      const line =
-        lines[i].trim();
-
-      if (!line) {
-        continue;
-      }
-
-      const cleanHex =
-        line.replace(
-          /[^0-9A-Fa-f]/g,
-          ''
-        );
-
-      if (
-        cleanHex.length < 4 ||
-        cleanHex.length % 2 !== 0
-      ) {
-        continue;
-      }
-
-      const bytes: number[] =
-        [];
-
-      for (
-        let k = 0;
-        k < cleanHex.length;
-        k += 2
-      ) {
-
-        bytes.push(
-          parseInt(
-            cleanHex.substring(
-              k,
-              k + 2
-            ),
-            16
-          )
-        );
-      }
-
-      const modeByte =
-        bytes[0];
-
-      const validElmResponse =
-        modeByte === 0x41 ||
-        modeByte === 0x43 ||
-        modeByte === 0x47 ||
-        modeByte === 0x4A ||
-        modeByte === 0x44 ||
-        modeByte === 0x59 ||
-        modeByte === 0x7F;
-
-      if (
-        !validElmResponse
-      ) {
-        continue;
-      }
-
-      const frame:
-        CanFrame = {
-
-        id: '0x7E8',
-
-        dlc:
-          Math.min(
-            bytes.length,
-            8
-          ),
-
-        dataHex:
-          bytes
-            .slice(0, 8)
-            .map(
-              b =>
-                b.toString(16)
-                  .padStart(2, '0')
-                  .toUpperCase()
-            )
-            .join(' '),
-
-        dataBytes:
-          bytes.slice(0, 8),
-
-        direction: 'Rx',
-
-        isExtended: false
-      };
-
-      /**
-       * IMPORTANT:
-       *
-       * Do not write directly to canManager.
-       *
-       * TransportManager owns insertion into canManager.
-       */
-      for (
-        const listener of [
-          ...this.canFrameListeners
-        ]
-      ) {
-
-        try {
-
-          listener(frame);
-
-        } catch (error) {
-
-          console.error(
-            '[BT-CAN-LISTENER]',
-            error
-          );
-        }
-      }
-    }
-
-    if (terminated) {
-      this.asciiRxBuffer = '';
-    }
   }
 
   // ===========================================================================
@@ -2333,10 +2225,6 @@ export class BluetoothSppTransport implements ITransport {
         keyByte2: 0xEA
       };
     }
-
-    // -------------------------------------------------------------------------
-    // CONNECTION
-    // -------------------------------------------------------------------------
 
     if (
       !this.isConnected()
@@ -2414,9 +2302,7 @@ export class BluetoothSppTransport implements ITransport {
         ).then(
           success => {
 
-            if (
-              success
-            ) {
+            if (success) {
               return;
             }
 
@@ -2496,10 +2382,6 @@ export class BluetoothSppTransport implements ITransport {
         ]
       };
     }
-
-    // -------------------------------------------------------------------------
-    // CONNECTION
-    // -------------------------------------------------------------------------
 
     if (
       !this.isConnected()
@@ -2608,9 +2490,7 @@ export class BluetoothSppTransport implements ITransport {
         ).then(
           success => {
 
-            if (
-              success
-            ) {
+            if (success) {
               return;
             }
 
@@ -2662,10 +2542,6 @@ export class BluetoothSppTransport implements ITransport {
         lastErrorCode: 0
       };
     }
-
-    // -------------------------------------------------------------------------
-    // CONNECTION
-    // -------------------------------------------------------------------------
 
     if (
       !this.isConnected()
@@ -2725,9 +2601,7 @@ export class BluetoothSppTransport implements ITransport {
         ).then(
           success => {
 
-            if (
-              success
-            ) {
+            if (success) {
               return;
             }
 
@@ -2809,11 +2683,6 @@ export class BluetoothSppTransport implements ITransport {
         );
       }
 
-      /**
-       * Logging is kept at the communication layer,
-       * but no console logging is performed per frame
-       * unless debugRawTraffic is enabled.
-       */
       commLogger.logPacket({
         direction: '[BT RX]',
         protocol:
@@ -2829,13 +2698,9 @@ export class BluetoothSppTransport implements ITransport {
       });
 
       /**
-       * CRITICAL:
+       * IMPORTANT:
        *
-       * DO NOT:
-       *
-       * canManager.addFrame(frame)
-       *
-       * TransportManager owns the central insertion point.
+       * TransportManager is the central owner of CAN insertion.
        */
       for (
         const listener of [
@@ -3021,7 +2886,7 @@ export class BluetoothSppTransport implements ITransport {
   }
 
   // ===========================================================================
-  // WEB SERIAL RX LOOP
+  // WEB SERIAL RX
   // ===========================================================================
 
   private async startSerialReadLoop():
@@ -3094,15 +2959,23 @@ export class BluetoothSppTransport implements ITransport {
   }
 
   // ===========================================================================
-  // NATIVE BLUETOOTH RX LOOP
+  // NATIVE BLUETOOTH LISTENERS
   // ===========================================================================
 
-  private async startNativeBtReadLoop():
-    Promise<void> {
+  /**
+   * Install native Bluetooth listeners before BluetoothSpp.connect().
+   *
+   * This is the critical fix for first-packet loss.
+   */
+  private async installNativeBtListeners(
+    listenerGeneration:
+      number
+  ): Promise<void> {
 
-    /**
-     * Remove old listeners before installing new ones.
-     */
+    // -------------------------------------------------------------------------
+    // Remove previous listeners
+    // -------------------------------------------------------------------------
+
     try {
       await this.nativeDataListener?.remove();
     } catch {}
@@ -3117,8 +2990,9 @@ export class BluetoothSppTransport implements ITransport {
     this.nativeDisconnectListener =
       null;
 
-    const listenerGeneration =
-      this.connectionGeneration;
+    // -------------------------------------------------------------------------
+    // DATA
+    // -------------------------------------------------------------------------
 
     this.nativeDataListener =
       await (
@@ -3128,7 +3002,7 @@ export class BluetoothSppTransport implements ITransport {
         (info: any) => {
 
           /**
-           * Ignore packets belonging to an old session.
+           * Ignore data from old Bluetooth sessions.
            */
           if (
             listenerGeneration !==
@@ -3146,6 +3020,9 @@ export class BluetoothSppTransport implements ITransport {
 
           try {
 
+            /**
+             * BluetoothSppPlugin emits number[].
+             */
             const bytes =
               this.normalizeIncomingBytes(
                 info.data
@@ -3171,12 +3048,16 @@ export class BluetoothSppTransport implements ITransport {
         }
       );
 
+    // -------------------------------------------------------------------------
+    // DISCONNECT
+    // -------------------------------------------------------------------------
+
     this.nativeDisconnectListener =
       await (
         BluetoothSpp as any
       ).addListener(
         'onBluetoothDisconnect',
-        () => {
+        (info: any) => {
 
           if (
             listenerGeneration !==
@@ -3186,7 +3067,8 @@ export class BluetoothSppTransport implements ITransport {
           }
 
           console.warn(
-            '[BT-NATIVE] Remote Bluetooth disconnect'
+            '[BT-NATIVE] Remote Bluetooth disconnect',
+            info?.error || ''
           );
 
           void this.handleNativeDisconnect();
@@ -3194,9 +3076,16 @@ export class BluetoothSppTransport implements ITransport {
       );
   }
 
+  // ===========================================================================
+  // NATIVE DISCONNECT
+  // ===========================================================================
+
   private async handleNativeDisconnect():
     Promise<void> {
 
+    /**
+     * If already disconnected, nothing to do.
+     */
     if (
       this.status ===
       'DISCONNECTED'
@@ -3205,14 +3094,16 @@ export class BluetoothSppTransport implements ITransport {
     }
 
     /**
-     * Invalidate the current session.
+     * Invalidate current connection immediately.
+     *
+     * This also invalidates queued writes.
      */
     this.connectionGeneration++;
 
     /**
-     * Native side already disconnected.
+     * Native side has already disconnected.
      *
-     * Do not call BluetoothSpp.disconnect() again.
+     * NEVER call BluetoothSpp.disconnect() here.
      */
     await this.cleanupConnectionResources(
       false
@@ -3220,9 +3111,6 @@ export class BluetoothSppTransport implements ITransport {
 
     this.rxBuffer =
       new Uint8Array(0);
-
-    this.asciiRxBuffer =
-      '';
 
     this.rawState =
       'DISCONNECTED';
