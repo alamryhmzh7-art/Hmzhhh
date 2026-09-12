@@ -49,28 +49,25 @@ Manifest.permission.ACCESS_COARSE_LOCATION
 @SuppressLint("MissingPermission")
 public class BluetoothSppPlugin extends Plugin {
 
-private static final String TAG = "HamzaBT";
-
+private static final String TAG = "BluetoothSppPlugin";
 private static final UUID SPP_UUID =
         UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
 
 private BluetoothAdapter bluetoothAdapter;
-
 private volatile BluetoothSocket socket;
 private volatile InputStream inputStream;
 private volatile OutputStream outputStream;
-
 private Thread readThread;
 
 private final AtomicBoolean isConnected = new AtomicBoolean(false);
 private final AtomicBoolean disconnectEventSent = new AtomicBoolean(false);
 
-private BroadcastReceiver discoveryReceiver = null;
-private boolean isReceiverRegistered = false;
+private BroadcastReceiver discoveryReceiver;
+private boolean isReceiverRegistered;
 
 @Override
 public void load() {
-    Log.d(TAG, "[BT-NATIVE] PLUGIN INITIALIZED");
+    Log.d(TAG, "Bluetooth SPP plugin initialized");
     bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
 }
 
@@ -86,50 +83,47 @@ protected void handleOnDestroy() {
         unregisterDiscoveryReceiver();
         disconnectInternal(false);
     } catch (Exception ignored) {
+        // Cleanup must not interrupt plugin destruction.
     }
 }
 
-private boolean checkBluetoothPermissions() {
+private boolean hasBluetoothPermissions() {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        boolean hasScan =
-                ActivityCompat.checkSelfPermission(
-                        getContext(),
-                        Manifest.permission.BLUETOOTH_SCAN
-                ) == PackageManager.PERMISSION_GRANTED;
-
-        boolean hasConnect =
-                ActivityCompat.checkSelfPermission(
-                        getContext(),
-                        Manifest.permission.BLUETOOTH_CONNECT
-                ) == PackageManager.PERMISSION_GRANTED;
-
-        return hasScan && hasConnect;
+        return ActivityCompat.checkSelfPermission(
+                getContext(),
+                Manifest.permission.BLUETOOTH_SCAN
+        ) == PackageManager.PERMISSION_GRANTED
+                && ActivityCompat.checkSelfPermission(
+                getContext(),
+                Manifest.permission.BLUETOOTH_CONNECT
+        ) == PackageManager.PERMISSION_GRANTED;
     }
 
-    boolean hasBt =
+    boolean hasBluetoothPermission =
             ActivityCompat.checkSelfPermission(
                     getContext(),
                     Manifest.permission.BLUETOOTH
             ) == PackageManager.PERMISSION_GRANTED;
 
-    boolean hasBtAdmin =
+    boolean hasBluetoothAdminPermission =
             ActivityCompat.checkSelfPermission(
                     getContext(),
                     Manifest.permission.BLUETOOTH_ADMIN
             ) == PackageManager.PERMISSION_GRANTED;
 
-    boolean hasLocation =
+    boolean hasLocationPermission =
             ActivityCompat.checkSelfPermission(
                     getContext(),
                     Manifest.permission.ACCESS_FINE_LOCATION
             ) == PackageManager.PERMISSION_GRANTED
-            ||
-            ActivityCompat.checkSelfPermission(
+                    || ActivityCompat.checkSelfPermission(
                     getContext(),
                     Manifest.permission.ACCESS_COARSE_LOCATION
             ) == PackageManager.PERMISSION_GRANTED;
 
-    return hasBt && hasBtAdmin && hasLocation;
+    return hasBluetoothPermission
+            && hasBluetoothAdminPermission
+            && hasLocationPermission;
 }
 
 @PluginMethod
@@ -140,15 +134,15 @@ public void startDiscovery(PluginCall call) {
     }
 
     if (!bluetoothAdapter.isEnabled()) {
-        call.reject("Bluetooth is turned off. Please turn on Bluetooth.");
+        call.reject("Bluetooth is disabled. Please enable Bluetooth and try again.");
         return;
     }
 
-    if (!checkBluetoothPermissions()) {
+    if (!hasBluetoothPermissions()) {
         requestPermissionForAlias(
                 "bluetooth",
                 call,
-                "discoveryPermsCallback"
+                "discoveryPermissionsCallback"
         );
         return;
     }
@@ -157,11 +151,11 @@ public void startDiscovery(PluginCall call) {
 }
 
 @PermissionCallback
-private void discoveryPermsCallback(PluginCall call) {
-    if (checkBluetoothPermissions()) {
+private void discoveryPermissionsCallback(PluginCall call) {
+    if (hasBluetoothPermissions()) {
         executeStartDiscovery(call);
     } else {
-        call.reject("Bluetooth scan / connect permissions denied by user.");
+        call.reject("Bluetooth scan and connection permissions were denied.");
     }
 }
 
@@ -173,27 +167,25 @@ private void executeStartDiscovery(PluginCall call) {
 
         registerDiscoveryReceiver();
 
-        Log.d(TAG, "[BT-SCAN] START");
-
         boolean started = bluetoothAdapter.startDiscovery();
 
         if (!started) {
             unregisterDiscoveryReceiver();
-            call.reject("Failed to initiate Bluetooth discovery");
+            call.reject("Unable to start Bluetooth discovery.");
             return;
         }
 
-        JSObject res = new JSObject();
-        res.put("started", true);
-        call.resolve(res);
+        JSObject result = new JSObject();
+        result.put("started", true);
+        call.resolve(result);
 
-    } catch (SecurityException e) {
-        Log.e(TAG, "[BT-SCAN] SecurityException: " + e.getMessage());
-        call.reject("SecurityException starting discovery: " + e.getMessage());
+    } catch (SecurityException exception) {
+        Log.e(TAG, "Security error while starting discovery", exception);
+        call.reject("Unable to start discovery due to a security restriction.");
 
-    } catch (Exception e) {
-        Log.e(TAG, "[BT-SCAN] Error: " + e.getMessage());
-        call.reject("Error starting discovery: " + e.getMessage());
+    } catch (Exception exception) {
+        Log.e(TAG, "Unexpected error while starting discovery", exception);
+        call.reject("Unable to start Bluetooth discovery: " + exception.getMessage());
     }
 }
 
@@ -206,12 +198,13 @@ public void stopDiscovery(PluginCall call) {
 
         unregisterDiscoveryReceiver();
 
-        JSObject res = new JSObject();
-        res.put("stopped", true);
-        call.resolve(res);
+        JSObject result = new JSObject();
+        result.put("stopped", true);
+        call.resolve(result);
 
-    } catch (Exception e) {
-        call.reject("Error stopping discovery: " + e.getMessage());
+    } catch (Exception exception) {
+        Log.e(TAG, "Error while stopping discovery", exception);
+        call.reject("Unable to stop Bluetooth discovery: " + exception.getMessage());
     }
 }
 
@@ -223,12 +216,10 @@ private synchronized void registerDiscoveryReceiver() {
     discoveryReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-
             String action = intent.getAction();
 
             if (BluetoothDevice.ACTION_FOUND.equals(action)) {
-
-                BluetoothDevice device = null;
+                BluetoothDevice device;
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     device = intent.getParcelableExtra(
@@ -246,56 +237,45 @@ private synchronized void registerDiscoveryReceiver() {
                 }
 
                 String name = null;
-
                 try {
                     name = device.getName();
                 } catch (SecurityException ignored) {
+                    // Device name may be unavailable without permission.
                 }
 
-                String address = device.getAddress();
+                String deviceType = "CLASSIC_SPP";
+                int bluetoothType = device.getType();
 
-                boolean bonded =
-                        device.getBondState() == BluetoothDevice.BOND_BONDED;
-
-                short rssi =
-                        intent.getShortExtra(
-                                BluetoothDevice.EXTRA_RSSI,
-                                Short.MIN_VALUE
-                        );
-
-                int btType = device.getType();
-
-                String typeStr = "CLASSIC_SPP";
-
-                if (btType == BluetoothDevice.DEVICE_TYPE_LE) {
-                    typeStr = "BLE";
-                } else if (btType == BluetoothDevice.DEVICE_TYPE_DUAL) {
-                    typeStr = "DUAL";
+                if (bluetoothType == BluetoothDevice.DEVICE_TYPE_LE) {
+                    deviceType = "BLE";
+                } else if (bluetoothType == BluetoothDevice.DEVICE_TYPE_DUAL) {
+                    deviceType = "DUAL";
                 }
 
-                JSObject devObj = new JSObject();
-
-                devObj.put(
+                JSObject deviceObject = new JSObject();
+                deviceObject.put(
                         "name",
                         name != null && !name.trim().isEmpty()
                                 ? name
                                 : "Unknown"
                 );
-
-                devObj.put("address", address);
-                devObj.put("bonded", bonded);
-                devObj.put("rssi", (int) rssi);
-                devObj.put("type", typeStr);
-
-                notifyListeners(
-                        "onBluetoothDeviceFound",
-                        devObj
+                deviceObject.put("address", device.getAddress());
+                deviceObject.put(
+                        "bonded",
+                        device.getBondState() == BluetoothDevice.BOND_BONDED
                 );
+                deviceObject.put(
+                        "rssi",
+                        (int) intent.getShortExtra(
+                                BluetoothDevice.EXTRA_RSSI,
+                                Short.MIN_VALUE
+                        )
+                );
+                deviceObject.put("type", deviceType);
 
-            } else if (
-                    BluetoothAdapter.ACTION_DISCOVERY_FINISHED.equals(action)
-            ) {
+                notifyListeners("onBluetoothDeviceFound", deviceObject);
 
+            } else if (BluetoothAdapter.ACTION_DISCOVERY_FINISHED.equals(action)) {
                 notifyListeners(
                         "onBluetoothDiscoveryFinished",
                         new JSObject()
@@ -305,7 +285,6 @@ private synchronized void registerDiscoveryReceiver() {
     };
 
     IntentFilter filter = new IntentFilter();
-
     filter.addAction(BluetoothDevice.ACTION_FOUND);
     filter.addAction(BluetoothAdapter.ACTION_DISCOVERY_STARTED);
     filter.addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED);
@@ -317,10 +296,7 @@ private synchronized void registerDiscoveryReceiver() {
                 Context.RECEIVER_NOT_EXPORTED
         );
     } else {
-        getContext().registerReceiver(
-                discoveryReceiver,
-                filter
-        );
+        getContext().registerReceiver(discoveryReceiver, filter);
     }
 
     isReceiverRegistered = true;
@@ -334,6 +310,7 @@ private synchronized void unregisterDiscoveryReceiver() {
     try {
         getContext().unregisterReceiver(discoveryReceiver);
     } catch (Exception ignored) {
+        // Receiver may already have been unregistered.
     }
 
     isReceiverRegistered = false;
@@ -342,17 +319,16 @@ private synchronized void unregisterDiscoveryReceiver() {
 
 @PluginMethod
 public void getPairedDevices(PluginCall call) {
-
     if (bluetoothAdapter == null) {
-        call.reject("Bluetooth is not supported on this hardware.");
+        call.reject("Bluetooth is not supported on this device.");
         return;
     }
 
-    if (!checkBluetoothPermissions()) {
+    if (!hasBluetoothPermissions()) {
         requestPermissionForAlias(
                 "bluetooth",
                 call,
-                "pairedPermsCallback"
+                "pairedDevicesPermissionsCallback"
         );
         return;
     }
@@ -361,553 +337,353 @@ public void getPairedDevices(PluginCall call) {
 }
 
 @PermissionCallback
-private void pairedPermsCallback(PluginCall call) {
-
-    if (checkBluetoothPermissions()) {
+private void pairedDevicesPermissionsCallback(PluginCall call) {
+    if (hasBluetoothPermissions()) {
         executeGetPairedDevices(call);
     } else {
-        call.reject("Bluetooth permission denied by user.");
+        call.reject("Bluetooth permissions were denied.");
     }
 }
 
 private void executeGetPairedDevices(PluginCall call) {
-
     try {
-
         Set<BluetoothDevice> pairedDevices =
                 bluetoothAdapter.getBondedDevices();
 
-        JSArray devicesArray = new JSArray();
+        JSArray devices = new JSArray();
 
         if (pairedDevices != null) {
-
             for (BluetoothDevice device : pairedDevices) {
-
-                JSObject devObj = new JSObject();
-
                 String name = device.getName();
-                String address = device.getAddress();
 
-                devObj.put(
+                JSObject deviceObject = new JSObject();
+                deviceObject.put(
                         "name",
                         name != null && !name.trim().isEmpty()
                                 ? name
                                 : "Unknown"
                 );
+                deviceObject.put("address", device.getAddress());
+                deviceObject.put("bonded", true);
+                deviceObject.put("type", "CLASSIC_SPP");
 
-                devObj.put("address", address);
-                devObj.put("bonded", true);
-                devObj.put("type", "CLASSIC_SPP");
-
-                devicesArray.put(devObj);
+                devices.put(deviceObject);
             }
         }
 
         JSObject result = new JSObject();
-        result.put("devices", devicesArray);
-
+        result.put("devices", devices);
         call.resolve(result);
 
-    } catch (SecurityException e) {
-        call.reject("SecurityException: " + e.getMessage());
+    } catch (SecurityException exception) {
+        call.reject("Unable to access paired devices due to a security restriction.");
 
-    } catch (Exception e) {
-        call.reject("Failed to get paired devices: " + e.getMessage());
+    } catch (Exception exception) {
+        Log.e(TAG, "Error while retrieving paired devices", exception);
+        call.reject("Unable to retrieve paired devices: " + exception.getMessage());
     }
 }
 
 @PluginMethod
 public void connect(PluginCall call) {
-
     String address = call.getString("address");
 
     if (address == null || address.trim().isEmpty()) {
-        call.reject("Must provide MAC address");
+        call.reject("A Bluetooth MAC address is required.");
         return;
     }
 
     if (bluetoothAdapter == null) {
-        call.reject("Bluetooth not supported");
+        call.reject("Bluetooth is not supported on this device.");
         return;
     }
 
-    if (!checkBluetoothPermissions()) {
+    if (!hasBluetoothPermissions()) {
         requestPermissionForAlias(
                 "bluetooth",
                 call,
-                "connectPermsCallback"
+                "connectPermissionsCallback"
         );
         return;
     }
 
-    executeConnect(
-            call,
-            address.trim().toUpperCase()
-    );
+    executeConnect(call, address.trim().toUpperCase());
 }
 
 @PermissionCallback
-private void connectPermsCallback(PluginCall call) {
-
+private void connectPermissionsCallback(PluginCall call) {
     String address = call.getString("address");
 
-    if (address != null && checkBluetoothPermissions()) {
-
-        executeConnect(
-                call,
-                address.trim().toUpperCase()
-        );
-
+    if (address != null && hasBluetoothPermissions()) {
+        executeConnect(call, address.trim().toUpperCase());
     } else {
-
-        call.reject(
-                "Bluetooth permission denied by user (BLUETOOTH_CONNECT)."
-        );
+        call.reject("Bluetooth connection permission was denied.");
     }
 }
 
-private void executeConnect(
-        PluginCall call,
-        String address
-) {
-
+private void executeConnect(PluginCall call, String address) {
     disconnectInternal(false);
 
     if (bluetoothAdapter.isDiscovering()) {
         bluetoothAdapter.cancelDiscovery();
     }
 
-    Log.d(
-            TAG,
-            "[BT-CONNECT] START address=" + address
-    );
+    Log.d(TAG, "Starting Bluetooth connection: " + address);
 
     new Thread(() -> {
-
-        BluetoothSocket tmpSocket = null;
+        BluetoothSocket candidateSocket = null;
         Exception lastException = null;
 
         try {
-
             BluetoothDevice device =
                     bluetoothAdapter.getRemoteDevice(address);
 
             if (device == null) {
-                call.reject(
-                        "Device not found for address: " + address
-                );
+                call.reject("No Bluetooth device was found for address: " + address);
                 return;
             }
 
-            /*
-             * Attempt 1:
-             * Standard authenticated RFCOMM SPP.
-             */
             try {
+                candidateSocket =
+                        device.createRfcommSocketToServiceRecord(SPP_UUID);
+                candidateSocket.connect();
 
-                tmpSocket =
-                        device.createRfcommSocketToServiceRecord(
-                                SPP_UUID
-                        );
-
-                tmpSocket.connect();
-
-            } catch (Exception e1) {
-
-                lastException = e1;
-
-                closeQuietly(tmpSocket);
-                tmpSocket = null;
+            } catch (Exception exception) {
+                lastException = exception;
+                closeQuietly(candidateSocket);
+                candidateSocket = null;
             }
 
-            /*
-             * Attempt 2:
-             * Insecure RFCOMM SPP.
-             */
-            if (tmpSocket == null || !tmpSocket.isConnected()) {
-
+            if (candidateSocket == null || !candidateSocket.isConnected()) {
                 try {
-
-                    tmpSocket =
+                    candidateSocket =
                             device.createInsecureRfcommSocketToServiceRecord(
                                     SPP_UUID
                             );
+                    candidateSocket.connect();
 
-                    tmpSocket.connect();
-
-                } catch (Exception e2) {
-
-                    lastException = e2;
-
-                    closeQuietly(tmpSocket);
-                    tmpSocket = null;
+                } catch (Exception exception) {
+                    lastException = exception;
+                    closeQuietly(candidateSocket);
+                    candidateSocket = null;
                 }
             }
 
-            /*
-             * Attempt 3:
-             * Channel 1 fallback for older adapters.
-             */
-            if (tmpSocket == null || !tmpSocket.isConnected()) {
-
+            if (candidateSocket == null || !candidateSocket.isConnected()) {
                 try {
-
                     java.lang.reflect.Method method =
                             device.getClass().getMethod(
                                     "createRfcommSocket",
                                     int.class
                             );
 
-                    tmpSocket =
-                            (BluetoothSocket) method.invoke(
-                                    device,
-                                    1
-                            );
+                    candidateSocket =
+                            (BluetoothSocket) method.invoke(device, 1);
 
-                    if (tmpSocket != null) {
-                        tmpSocket.connect();
+                    if (candidateSocket != null) {
+                        candidateSocket.connect();
                     }
 
-                } catch (Exception e3) {
-
-                    lastException = e3;
-
-                    closeQuietly(tmpSocket);
-                    tmpSocket = null;
+                } catch (Exception exception) {
+                    lastException = exception;
+                    closeQuietly(candidateSocket);
+                    candidateSocket = null;
                 }
             }
 
-            if (tmpSocket == null || !tmpSocket.isConnected()) {
+            if (candidateSocket == null || !candidateSocket.isConnected()) {
+                String message = lastException != null
+                        ? lastException.getMessage()
+                        : "RFCOMM connection failed.";
 
-                String errorMsg =
-                        lastException != null
-                                ? lastException.getMessage()
-                                : "RFCOMM connection failed";
-
-                Log.e(
-                        TAG,
-                        "[BT-CONNECT] FAILED error=" + errorMsg
-                );
-
-                closeQuietly(tmpSocket);
-
-                call.reject(
-                        "Connection failed: " + errorMsg
-                );
-
+                Log.e(TAG, "Bluetooth connection failed: " + message);
+                closeQuietly(candidateSocket);
+                call.reject("Unable to connect to the Bluetooth device: " + message);
                 return;
             }
 
-            InputStream newInputStream =
-                    tmpSocket.getInputStream();
-
-            OutputStream newOutputStream =
-                    tmpSocket.getOutputStream();
-
-            socket = tmpSocket;
-            inputStream = newInputStream;
-            outputStream = newOutputStream;
+            socket = candidateSocket;
+            inputStream = candidateSocket.getInputStream();
+            outputStream = candidateSocket.getOutputStream();
 
             disconnectEventSent.set(false);
             isConnected.set(true);
 
-            Log.d(
-                    TAG,
-                    "[BT-CONNECT] SUCCESS"
-            );
-
             startReadThread();
 
-            JSObject res = new JSObject();
+            JSObject result = new JSObject();
+            result.put("connected", true);
+            result.put("address", address);
+            call.resolve(result);
 
-            res.put("connected", true);
-            res.put("address", address);
+            Log.d(TAG, "Bluetooth connection established successfully.");
 
-            call.resolve(res);
-
-        } catch (Exception e) {
-
-            Log.e(
-                    TAG,
-                    "[BT-CONNECT] FAILED error=" + e.getMessage()
-            );
-
-            closeQuietly(tmpSocket);
-
+        } catch (Exception exception) {
+            Log.e(TAG, "Unexpected Bluetooth connection error", exception);
+            closeQuietly(candidateSocket);
             disconnectInternal(false);
-
-            call.reject(
-                    "Connection failed: " + e.getMessage()
-            );
+            call.reject("Unable to connect to the Bluetooth device: "
+                    + exception.getMessage());
         }
-
-    }, "HamzaBT-Connect").start();
+    }, "BluetoothSpp-Connect").start();
 }
 
 private void startReadThread() {
-
     if (readThread != null && readThread.isAlive()) {
         return;
     }
 
-    Log.d(
-            TAG,
-            "[BT-NATIVE] READ THREAD STARTED"
-    );
+    readThread = new Thread(() -> {
+        byte[] buffer = new byte[1024];
 
-    readThread =
-            new Thread(
-                    () -> {
+        try {
+            while (isConnected.get()) {
+                InputStream stream = inputStream;
 
-                        byte[] buffer = new byte[1024];
+                if (stream == null) {
+                    break;
+                }
 
-                        try {
+                int bytesRead = stream.read(buffer);
 
-                            while (isConnected.get()) {
+                if (bytesRead < 0) {
+                    break;
+                }
 
-                                InputStream stream =
-                                        inputStream;
+                if (bytesRead == 0) {
+                    continue;
+                }
 
-                                if (stream == null) {
-                                    break;
-                                }
+                JSArray data = new JSArray();
 
-                                int bytes =
-                                        stream.read(buffer);
+                for (int index = 0; index < bytesRead; index++) {
+                    data.put(buffer[index] & 0xFF);
+                }
 
-                                if (bytes < 0) {
-                                    break;
-                                }
+                JSObject result = new JSObject();
+                result.put("data", data);
+                notifyListeners("onBluetoothData", result);
+            }
 
-                                if (bytes == 0) {
-                                    continue;
-                                }
+        } catch (Exception exception) {
+            if (isConnected.get()) {
+                Log.e(TAG, "Bluetooth read error", exception);
+                sendDisconnectEvent("Bluetooth disconnected: "
+                        + exception.getMessage());
+            }
 
-                                byte[] readBuf =
-                                        new byte[bytes];
+        } finally {
+            if (isConnected.get()) {
+                sendDisconnectEvent("Bluetooth input stream closed.");
+            }
 
-                                System.arraycopy(
-                                        buffer,
-                                        0,
-                                        readBuf,
-                                        0,
-                                        bytes
-                                );
-
-                                /*
-                                 * IMPORTANT:
-                                 * Do not convert binary traffic
-                                 * to String before sending it.
-                                 *
-                                 * The OBD/CAN protocol is binary.
-                                 */
-                                JSArray jsArr =
-                                        new JSArray();
-
-                                for (int i = 0; i < bytes; i++) {
-                                    jsArr.put(
-                                            readBuf[i] & 0xFF
-                                    );
-                                }
-
-                                JSObject ret =
-                                        new JSObject();
-
-                                ret.put(
-                                        "data",
-                                        jsArr
-                                );
-
-                                notifyListeners(
-                                        "onBluetoothData",
-                                        ret
-                                );
-                            }
-
-                        } catch (Exception e) {
-
-                            if (isConnected.get()) {
-
-                                Log.e(
-                                        TAG,
-                                        "[BT-RX] READ ERROR: "
-                                                + e.getMessage()
-                                );
-
-                                sendDisconnectEvent(
-                                        "Disconnected: "
-                                                + e.getMessage()
-                                );
-                            }
-
-                        } finally {
-
-                            if (isConnected.get()) {
-
-                                sendDisconnectEvent(
-                                        "Bluetooth input stream closed"
-                                );
-                            }
-
-                            isConnected.set(false);
-                        }
-
-                    },
-                    "HamzaBT-Read"
-            );
+            isConnected.set(false);
+        }
+    }, "BluetoothSpp-Read");
 
     readThread.start();
 }
 
-private void sendDisconnectEvent(String error) {
-
+private void sendDisconnectEvent(String message) {
     if (!disconnectEventSent.compareAndSet(false, true)) {
         return;
     }
 
-    JSObject err =
-            new JSObject();
-
-    err.put(
+    JSObject result = new JSObject();
+    result.put(
             "error",
-            error != null
-                    ? error
-                    : "Bluetooth disconnected"
+            message != null ? message : "Bluetooth disconnected."
     );
 
-    notifyListeners(
-            "onBluetoothDisconnect",
-            err
-    );
+    notifyListeners("onBluetoothDisconnect", result);
 }
 
 @PluginMethod
 public void write(PluginCall call) {
-
     if (!isConnected.get()) {
-        call.reject("Not connected");
+        call.reject("No active Bluetooth connection.");
         return;
     }
 
-    OutputStream stream =
-            outputStream;
+    OutputStream stream = outputStream;
 
     if (stream == null) {
-        call.reject("Bluetooth output stream is unavailable");
+        call.reject("Bluetooth output stream is unavailable.");
         return;
     }
 
-    JSArray dataArr =
-            call.getArray("data");
+    JSArray data = call.getArray("data");
 
-    if (dataArr == null) {
-        call.reject("No data provided");
+    if (data == null) {
+        call.reject("No data was provided.");
         return;
     }
 
-    if (dataArr.length() == 0) {
+    if (data.length() == 0) {
         call.resolve();
         return;
     }
 
     try {
+        byte[] buffer = new byte[data.length()];
 
-        byte[] buffer =
-                new byte[dataArr.length()];
-
-        for (int i = 0; i < dataArr.length(); i++) {
-
-            int value =
-                    dataArr.getInt(i);
+        for (int index = 0; index < data.length(); index++) {
+            int value = data.getInt(index);
 
             if (value < 0 || value > 255) {
-                call.reject(
-                        "Invalid byte at index "
-                                + i
-                );
+                call.reject("Invalid byte value at index " + index
+                        + ". Values must be between 0 and 255.");
                 return;
             }
 
-            buffer[i] =
-                    (byte) value;
+            buffer[index] = (byte) value;
         }
 
-        /*
-         * Do not generate a hex String for every packet.
-         * Heavy logging can contribute to freezes during
-         * high-rate CAN traffic.
-         */
         stream.write(buffer);
         stream.flush();
-
         call.resolve();
 
-    } catch (Exception e) {
-
-        Log.e(
-                TAG,
-                "[BT-WRITE] Error: "
-                        + e.getMessage()
-        );
+    } catch (Exception exception) {
+        Log.e(TAG, "Bluetooth write error", exception);
 
         isConnected.set(false);
+        sendDisconnectEvent("Bluetooth write failed: "
+                + exception.getMessage());
 
-        sendDisconnectEvent(
-                "Write failed: " + e.getMessage()
-        );
-
-        call.reject(
-                "Write failed: "
-                        + e.getMessage()
-        );
+        call.reject("Unable to write Bluetooth data: "
+                + exception.getMessage());
     }
 }
 
 @PluginMethod
 public void disconnect(PluginCall call) {
-
     disconnectInternal(true);
-
-    Log.d(
-            TAG,
-            "[BT-NATIVE] RFCOMM DISCONNECT"
-    );
-
+    Log.d(TAG, "Bluetooth RFCOMM connection closed.");
     call.resolve();
 }
 
-private synchronized void disconnectInternal(
-        boolean notify
-) {
-
-    boolean wasConnected =
-            isConnected.getAndSet(false);
+private synchronized void disconnectInternal(boolean notify) {
+    boolean wasConnected = isConnected.getAndSet(false);
 
     if (notify && wasConnected) {
-
-        sendDisconnectEvent(
-                "Bluetooth disconnected"
-        );
+        sendDisconnectEvent("Bluetooth disconnected.");
     }
 
-    InputStream in = inputStream;
-    OutputStream out = outputStream;
+    InputStream currentInputStream = inputStream;
+    OutputStream currentOutputStream = outputStream;
     BluetoothSocket currentSocket = socket;
 
     inputStream = null;
     outputStream = null;
     socket = null;
-
-    closeQuietly(in);
-    closeQuietly(out);
-    closeQuietly(currentSocket);
-
     readThread = null;
+
+    closeQuietly(currentInputStream);
+    closeQuietly(currentOutputStream);
+    closeQuietly(currentSocket);
 }
 
-private void closeQuietly(
-        BluetoothSocket target
-) {
+private void closeQuietly(BluetoothSocket target) {
     if (target == null) {
         return;
     }
@@ -915,12 +691,11 @@ private void closeQuietly(
     try {
         target.close();
     } catch (Exception ignored) {
+        // Ignore cleanup failures.
     }
 }
 
-private void closeQuietly(
-        InputStream target
-) {
+private void closeQuietly(InputStream target) {
     if (target == null) {
         return;
     }
@@ -928,12 +703,11 @@ private void closeQuietly(
     try {
         target.close();
     } catch (Exception ignored) {
+        // Ignore cleanup failures.
     }
 }
 
-private void closeQuietly(
-        OutputStream target
-) {
+private void closeQuietly(OutputStream target) {
     if (target == null) {
         return;
     }
@@ -941,6 +715,7 @@ private void closeQuietly(
     try {
         target.close();
     } catch (Exception ignored) {
+        // Ignore cleanup failures.
     }
 }
 
