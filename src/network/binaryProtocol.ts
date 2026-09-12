@@ -2,16 +2,31 @@
  * HAMZA OBD PRO - Unified Binary Frame Protocol
  *
  * Wire format:
- * [0xAA 0x55]
- * [CMD (1B)]
- * [LEN (2B, Big Endian)]
- * [PAYLOAD (N Bytes)]
- * [CHECKSUM (1B, XOR)]
- * [0x0D 0x0A]
+ *
+ *   [0xAA 0x55]
+ *   [CMD       1B]
+ *   [LEN       2B, Big Endian]
+ *   [PAYLOAD   N Bytes]
+ *   [CHECKSUM  1B, XOR]
+ *   [0x0D 0x0A]
+ *
+ * Checksum:
+ *   CMD ^ LEN_HIGH ^ LEN_LOW ^ PAYLOAD[0] ^ ... ^ PAYLOAD[N-1]
+ *
+ * CAN payload:
+ *   [ID 4B][FLAGS 1B][DLC 1B][DATA 0..8B]
+ *
+ * FLAGS:
+ *   bit 0 = Extended CAN ID
+ *   bit 1 = RTR
  *
  * IMPORTANT:
- * This implementation is kept compatible with the current
- * ESP32 firmware protocol.
+ * - This file remains wire-compatible with the current ESP32 firmware.
+ * - The parser is stream-safe: partial frames are preserved.
+ * - Multiple frames in one read are supported.
+ * - Corrupted frames are resynchronized without dropping valid
+ *   following frames.
+ * - No synthetic CAN data is generated here.
  */
 
 import {
@@ -88,10 +103,11 @@ export class BinaryProtocol {
   public static readonly TRAILER_BYTE_2 = 0x0A;
 
   /**
-   * Maximum payload currently supported by the ESP32
-   * binary transport frame.
+   * Maximum payload accepted by the current binary transport.
    *
-   * Normal CAN packet payload is only 6..14 bytes.
+   * The current ESP32 implementation uses a 256-byte temporary
+   * packet buffer, therefore payloads above 256 bytes must not
+   * be emitted by this protocol implementation.
    */
   public static readonly MAX_PAYLOAD_SIZE = 256;
 
@@ -99,19 +115,73 @@ export class BinaryProtocol {
   public static readonly CAN_MAX_DLC = 8;
 
   /**
+   * Protocol debugging is intentionally disabled by default.
+   *
+   * Logging every CAN frame from the binary parser can severely
+   * reduce UI performance when the CAN bus is busy.
+   */
+  private static debugEnabled = false;
+
+  public static setDebug(enabled: boolean): void {
+    this.debugEnabled = enabled;
+  }
+
+  public static isDebugEnabled(): boolean {
+    return this.debugEnabled;
+  }
+
+  private static debug(message: string): void {
+    if (this.debugEnabled) {
+      console.debug(message);
+    }
+  }
+
+  private static warn(message: string): void {
+    console.warn(message);
+  }
+
+  /**
    * Compute XOR checksum.
    *
    * ESP32 uses exactly:
-   * cmd ^ LEN_HIGH ^ LEN_LOW ^ every payload byte
+   *
+   *   cmd ^ LEN_HIGH ^ LEN_LOW ^ every payload byte
    */
   public static computeChecksum(
     cmd: number,
     len: number,
     payload: Uint8Array | number[]
   ): number {
+    if (
+      !Number.isInteger(cmd) ||
+      cmd < 0 ||
+      cmd > 0xFF
+    ) {
+      throw new Error(
+        `[PROTO] Invalid command byte: ${cmd}`
+      );
+    }
+
+    if (
+      !Number.isInteger(len) ||
+      len < 0 ||
+      len > 0xFFFF
+    ) {
+      throw new Error(
+        `[PROTO] Invalid payload length: ${len}`
+      );
+    }
+
+    if (payload.length !== len) {
+      throw new Error(
+        `[PROTO] Checksum payload length mismatch: ` +
+        `declared=${len}, actual=${payload.length}`
+      );
+    }
+
     let checksum =
       (cmd & 0xFF) ^
-      ((len >> 8) & 0xFF) ^
+      ((len >>> 8) & 0xFF) ^
       (len & 0xFF);
 
     for (let i = 0; i < payload.length; i++) {
@@ -122,7 +192,11 @@ export class BinaryProtocol {
   }
 
   /**
-   * Convert CAN ID to unsigned 32-bit value.
+   * Validate and normalize a CAN identifier.
+   *
+   * CAN ID range:
+   *   Standard = 0x000 .. 0x7FF
+   *   Extended = 0x00000000 .. 0x1FFFFFFF
    */
   private static normalizeCanId(canId: number): number {
     if (!Number.isFinite(canId)) {
@@ -130,12 +204,19 @@ export class BinaryProtocol {
     }
 
     if (!Number.isInteger(canId)) {
-      throw new Error('[PROTO] CAN ID must be an integer');
+      throw new Error(
+        `[PROTO] CAN ID must be an integer: ${canId}`
+      );
     }
 
-    if (canId < 0 || canId > 0x1FFFFFFF) {
+    if (
+      canId < 0 ||
+      canId > 0x1FFFFFFF
+    ) {
       throw new Error(
-        `[PROTO] CAN ID out of range: 0x${canId.toString(16)}`
+        `[PROTO] CAN ID out of range: 0x${canId
+          .toString(16)
+          .toUpperCase()}`
       );
     }
 
@@ -143,14 +224,69 @@ export class BinaryProtocol {
   }
 
   /**
+   * Validate one byte.
+   */
+  private static normalizeByte(
+    value: number,
+    fieldName: string
+  ): number {
+    if (
+      !Number.isInteger(value) ||
+      value < 0 ||
+      value > 0xFF
+    ) {
+      throw new Error(
+        `[PROTO] ${fieldName} must be a byte (0..255): ${value}`
+      );
+    }
+
+    return value;
+  }
+
+  /**
+   * Validate a CAN data field.
+   */
+  private static normalizeCanData(
+    data: number[] | Uint8Array
+  ): number[] {
+    if (
+      !Array.isArray(data) &&
+      !(data instanceof Uint8Array)
+    ) {
+      throw new Error(
+        '[PROTO] CAN data must be number[] or Uint8Array'
+      );
+    }
+
+    if (data.length > this.CAN_MAX_DLC) {
+      throw new Error(
+        `[PROTO] CAN data length exceeds DLC 8: ${data.length}`
+      );
+    }
+
+    const result: number[] = [];
+
+    for (let i = 0; i < data.length; i++) {
+      result.push(
+        this.normalizeByte(
+          Number(data[i]),
+          `CAN data[${i}]`
+        )
+      );
+    }
+
+    return result;
+  }
+
+  /**
    * Encode CAN frame.
    *
    * Payload:
-   * [ID 4B][FLAGS 1B][DLC 1B][DATA 0..8B]
+   *   [ID 4B][FLAGS 1B][DLC 1B][DATA 0..8B]
    *
    * FLAGS:
-   * bit 0 = Extended CAN ID
-   * bit 1 = RTR
+   *   bit 0 = Extended CAN ID
+   *   bit 1 = RTR
    */
   public static encodeCanFrame(
     canId: number,
@@ -158,37 +294,69 @@ export class BinaryProtocol {
     isExtended: boolean = false,
     isRtr: boolean = false
   ): Uint8Array {
-    const normalizedId = this.normalizeCanId(canId);
-
-    if (!isExtended && normalizedId > 0x7FF) {
+    if (typeof isExtended !== 'boolean') {
       throw new Error(
-        `[PROTO] Standard 11-bit CAN ID exceeds 0x7FF: 0x${normalizedId
+        '[PROTO] isExtended must be boolean'
+      );
+    }
+
+    if (typeof isRtr !== 'boolean') {
+      throw new Error(
+        '[PROTO] isRtr must be boolean'
+      );
+    }
+
+    const normalizedId =
+      this.normalizeCanId(canId);
+
+    if (
+      !isExtended &&
+      normalizedId > 0x7FF
+    ) {
+      throw new Error(
+        `[PROTO] Standard 11-bit CAN ID exceeds 0x7FF: ` +
+        `0x${normalizedId
           .toString(16)
           .toUpperCase()}`
       );
     }
 
-    const dlc = Math.min(
-      this.CAN_MAX_DLC,
-      Math.max(0, data.length)
-    );
+    const normalizedData =
+      this.normalizeCanData(data);
+
+    const dlc =
+      normalizedData.length;
 
     const flags =
       (isExtended ? 0x01 : 0x00) |
       (isRtr ? 0x02 : 0x00);
 
-    const payload = new Uint8Array(6 + dlc);
+    const payload =
+      new Uint8Array(
+        this.CAN_MIN_PAYLOAD_SIZE + dlc
+      );
 
-    payload[0] = (normalizedId >>> 24) & 0xFF;
-    payload[1] = (normalizedId >>> 16) & 0xFF;
-    payload[2] = (normalizedId >>> 8) & 0xFF;
-    payload[3] = normalizedId & 0xFF;
+    payload[0] =
+      (normalizedId >>> 24) & 0xFF;
 
-    payload[4] = flags;
-    payload[5] = dlc;
+    payload[1] =
+      (normalizedId >>> 16) & 0xFF;
+
+    payload[2] =
+      (normalizedId >>> 8) & 0xFF;
+
+    payload[3] =
+      normalizedId & 0xFF;
+
+    payload[4] =
+      flags;
+
+    payload[5] =
+      dlc;
 
     for (let i = 0; i < dlc; i++) {
-      payload[6 + i] = data[i] & 0xFF;
+      payload[6 + i] =
+        normalizedData[i];
     }
 
     return this.wrapPacket(
@@ -200,17 +368,23 @@ export class BinaryProtocol {
   /**
    * Encode PING request.
    *
-   * Current ESP32 firmware only requires the command itself,
-   * but keeps compatibility with the existing 8-byte timestamp.
+   * Current ESP32 firmware accepts CMD_PING regardless of
+   * the payload. We preserve the existing 8-byte timestamp
+   * for compatibility.
    */
   public static encodePing(): Uint8Array {
-    const timestamp = BigInt(Date.now());
-    const payload = new Uint8Array(8);
+    const timestamp =
+      BigInt(Date.now());
+
+    const payload =
+      new Uint8Array(8);
 
     for (let i = 0; i < 8; i++) {
-      payload[7 - i] = Number(
-        (timestamp >> BigInt(i * 8)) & 0xFFn
-      );
+      payload[7 - i] =
+        Number(
+          (timestamp >> BigInt(i * 8)) &
+          0xFFn
+        );
     }
 
     return this.wrapPacket(
@@ -227,22 +401,61 @@ export class BinaryProtocol {
     canReady: boolean,
     freeHeapBytes: number
   ): Uint8Array {
-    const payload = new Uint8Array(9);
+    if (
+      !Number.isFinite(uptimeMs) ||
+      uptimeMs < 0 ||
+      uptimeMs > 0xFFFFFFFF
+    ) {
+      throw new Error(
+        `[PROTO] Invalid uptimeMs: ${uptimeMs}`
+      );
+    }
 
-    const uptime = uptimeMs >>> 0;
-    const heap = freeHeapBytes >>> 0;
+    if (
+      !Number.isFinite(freeHeapBytes) ||
+      freeHeapBytes < 0 ||
+      freeHeapBytes > 0xFFFFFFFF
+    ) {
+      throw new Error(
+        `[PROTO] Invalid freeHeapBytes: ${freeHeapBytes}`
+      );
+    }
 
-    payload[0] = (uptime >>> 24) & 0xFF;
-    payload[1] = (uptime >>> 16) & 0xFF;
-    payload[2] = (uptime >>> 8) & 0xFF;
-    payload[3] = uptime & 0xFF;
+    const payload =
+      new Uint8Array(9);
 
-    payload[4] = canReady ? 0x01 : 0x00;
+    const uptime =
+      Math.trunc(uptimeMs) >>> 0;
 
-    payload[5] = (heap >>> 24) & 0xFF;
-    payload[6] = (heap >>> 16) & 0xFF;
-    payload[7] = (heap >>> 8) & 0xFF;
-    payload[8] = heap & 0xFF;
+    const heap =
+      Math.trunc(freeHeapBytes) >>> 0;
+
+    payload[0] =
+      (uptime >>> 24) & 0xFF;
+
+    payload[1] =
+      (uptime >>> 16) & 0xFF;
+
+    payload[2] =
+      (uptime >>> 8) & 0xFF;
+
+    payload[3] =
+      uptime & 0xFF;
+
+    payload[4] =
+      canReady ? 0x01 : 0x00;
+
+    payload[5] =
+      (heap >>> 24) & 0xFF;
+
+    payload[6] =
+      (heap >>> 16) & 0xFF;
+
+    payload[7] =
+      (heap >>> 8) & 0xFF;
+
+    payload[8] =
+      heap & 0xFF;
 
     return this.wrapPacket(
       BinaryCommand.CMD_PONG,
@@ -261,12 +474,18 @@ export class BinaryProtocol {
   }
 
   /**
-   * Configure CAN speed.
+   * Configure CAN speed and hardware filter.
    *
-   * Compatible with ESP32 firmware:
-   * payload[0..1] = speed in kbps
-   * payload[2..5] = filter ID
-   * payload[6..9] = filter mask
+   * Current ESP32 firmware expects:
+   *
+   *   payload[0..1] = speed in kbps
+   *   payload[2..5] = filter ID
+   *   payload[6..9] = filter mask
+   *
+   * NOTE:
+   * The current ESP32 firmware shown earlier only consumes
+   * the speed bytes. The filter fields are retained for
+   * protocol compatibility and future firmware support.
    */
   public static encodeConfigCan(
     speedKbps: number,
@@ -275,6 +494,7 @@ export class BinaryProtocol {
   ): Uint8Array {
     if (
       !Number.isFinite(speedKbps) ||
+      !Number.isInteger(speedKbps) ||
       speedKbps < 0 ||
       speedKbps > 0xFFFF
     ) {
@@ -286,23 +506,51 @@ export class BinaryProtocol {
     const normalizedFilterId =
       this.normalizeCanId(filterId);
 
+    if (
+      !Number.isInteger(filterMask) ||
+      filterMask < 0 ||
+      filterMask > 0xFFFFFFFF
+    ) {
+      throw new Error(
+        `[PROTO] Invalid CAN filter mask: ${filterMask}`
+      );
+    }
+
     const normalizedFilterMask =
       filterMask >>> 0;
 
-    const payload = new Uint8Array(10);
+    const payload =
+      new Uint8Array(10);
 
-    payload[0] = (speedKbps >>> 8) & 0xFF;
-    payload[1] = speedKbps & 0xFF;
+    payload[0] =
+      (speedKbps >>> 8) & 0xFF;
 
-    payload[2] = (normalizedFilterId >>> 24) & 0xFF;
-    payload[3] = (normalizedFilterId >>> 16) & 0xFF;
-    payload[4] = (normalizedFilterId >>> 8) & 0xFF;
-    payload[5] = normalizedFilterId & 0xFF;
+    payload[1] =
+      speedKbps & 0xFF;
 
-    payload[6] = (normalizedFilterMask >>> 24) & 0xFF;
-    payload[7] = (normalizedFilterMask >>> 16) & 0xFF;
-    payload[8] = (normalizedFilterMask >>> 8) & 0xFF;
-    payload[9] = normalizedFilterMask & 0xFF;
+    payload[2] =
+      (normalizedFilterId >>> 24) & 0xFF;
+
+    payload[3] =
+      (normalizedFilterId >>> 16) & 0xFF;
+
+    payload[4] =
+      (normalizedFilterId >>> 8) & 0xFF;
+
+    payload[5] =
+      normalizedFilterId & 0xFF;
+
+    payload[6] =
+      (normalizedFilterMask >>> 24) & 0xFF;
+
+    payload[7] =
+      (normalizedFilterMask >>> 16) & 0xFF;
+
+    payload[8] =
+      (normalizedFilterMask >>> 8) & 0xFF;
+
+    payload[9] =
+      normalizedFilterMask & 0xFF;
 
     return this.wrapPacket(
       BinaryCommand.CMD_CONFIG_CAN,
@@ -311,39 +559,80 @@ export class BinaryProtocol {
   }
 
   /**
-   * Wrap packet using the exact ESP32 wire format.
+   * Wrap a binary packet using the exact wire format.
    */
   public static wrapPacket(
     cmd: BinaryCommand,
     payload: Uint8Array
   ): Uint8Array {
-    const len = payload.length;
+    if (
+      !Number.isInteger(cmd) ||
+      cmd < 0 ||
+      cmd > 0xFF
+    ) {
+      throw new Error(
+        `[PROTO] Invalid command: ${cmd}`
+      );
+    }
 
-    if (len > this.MAX_PAYLOAD_SIZE) {
+    if (!(payload instanceof Uint8Array)) {
+      throw new Error(
+        '[PROTO] Payload must be Uint8Array'
+      );
+    }
+
+    const len =
+      payload.length;
+
+    if (
+      len < 0 ||
+      len > this.MAX_PAYLOAD_SIZE
+    ) {
       throw new Error(
         `[PROTO] Payload too large: ${len} > ${this.MAX_PAYLOAD_SIZE}`
       );
     }
 
     const packetLength =
-      2 + 1 + 2 + len + 1 + 2;
+      2 +       // MAGIC
+      1 +       // CMD
+      2 +       // LEN
+      len +     // PAYLOAD
+      1 +       // CHECKSUM
+      2;        // TRAILER
 
-    const packet = new Uint8Array(packetLength);
+    const packet =
+      new Uint8Array(packetLength);
 
-    packet[0] = this.MAGIC_BYTE_1;
-    packet[1] = this.MAGIC_BYTE_2;
+    packet[0] =
+      this.MAGIC_BYTE_1;
 
-    packet[2] = cmd & 0xFF;
+    packet[1] =
+      this.MAGIC_BYTE_2;
 
-    packet[3] = (len >>> 8) & 0xFF;
-    packet[4] = len & 0xFF;
+    packet[2] =
+      cmd & 0xFF;
 
-    packet.set(payload, 5);
+    packet[3] =
+      (len >>> 8) & 0xFF;
+
+    packet[4] =
+      len & 0xFF;
+
+    packet.set(
+      payload,
+      5
+    );
 
     const checksum =
-      this.computeChecksum(cmd, len, payload);
+      this.computeChecksum(
+        cmd,
+        len,
+        payload
+      );
 
-    packet[5 + len] = checksum;
+    packet[5 + len] =
+      checksum;
 
     packet[5 + len + 1] =
       this.TRAILER_BYTE_1;
@@ -351,7 +640,7 @@ export class BinaryProtocol {
     packet[5 + len + 2] =
       this.TRAILER_BYTE_2;
 
-    console.log(
+    this.debug(
       `[PROTO-TX] CMD=0x${cmd
         .toString(16)
         .padStart(2, '0')
@@ -362,13 +651,18 @@ export class BinaryProtocol {
   }
 
   /**
-   * Parse a continuous transport stream.
+   * Parse a continuous byte stream.
    *
-   * Supports:
+   * Handles:
    * - partial frames
    * - multiple frames in one read
+   * - garbage before AA55
    * - corrupted frames
-   * - garbage bytes before a valid AA55 header
+   * - a trailing single 0xAA byte
+   * - a frame split at any byte boundary
+   *
+   * IMPORTANT:
+   * This function does not mutate the supplied buffer.
    */
   public static parseStream(
     streamBuffer: Uint8Array
@@ -376,12 +670,17 @@ export class BinaryProtocol {
     packets: DecodedBinaryPacket[];
     remainingBuffer: Uint8Array;
   } {
-    const packets: DecodedBinaryPacket[] = [];
+    const packets:
+      DecodedBinaryPacket[] = [];
 
-    if (!streamBuffer || streamBuffer.length === 0) {
+    if (
+      !streamBuffer ||
+      streamBuffer.length === 0
+    ) {
       return {
         packets,
-        remainingBuffer: new Uint8Array(0)
+        remainingBuffer:
+          new Uint8Array(0)
       };
     }
 
@@ -389,33 +688,61 @@ export class BinaryProtocol {
 
     while (i < streamBuffer.length) {
       /*
-       * We need at least:
-       * AA 55 CMD LEN_H LEN_L CS 0D 0A
-       * = 8 bytes for an empty payload.
+       * We need two bytes to decide whether this is
+       * the AA55 synchronization header.
        *
-       * The old parser used 7 here, which was one byte short.
+       * If only AA remains at the end, preserve it.
        */
-      if (i + 5 > streamBuffer.length) {
+      if (
+        i + 1 >=
+        streamBuffer.length
+      ) {
         break;
       }
 
+      /*
+       * Search for AA55.
+       */
       if (
-        streamBuffer[i] !== this.MAGIC_BYTE_1 ||
-        streamBuffer[i + 1] !== this.MAGIC_BYTE_2
+        streamBuffer[i] !==
+          this.MAGIC_BYTE_1 ||
+        streamBuffer[i + 1] !==
+          this.MAGIC_BYTE_2
       ) {
         i++;
         continue;
+      }
+
+      /*
+       * We have AA55, but need CMD + LEN(2).
+       */
+      if (
+        i + 5 >
+        streamBuffer.length
+      ) {
+        break;
       }
 
       const cmd =
         streamBuffer[i + 2] as BinaryCommand;
 
       const len =
-        ((streamBuffer[i + 3] << 8) |
-          streamBuffer[i + 4]) >>> 0;
+        (
+          (streamBuffer[i + 3] << 8) |
+          streamBuffer[i + 4]
+        ) >>> 0;
 
-      if (len > this.MAX_PAYLOAD_SIZE) {
-        console.warn(
+      /*
+       * Reject impossible payload sizes.
+       *
+       * Move only one byte forward so another AA55
+       * sequence can be found without destroying data.
+       */
+      if (
+        len >
+        this.MAX_PAYLOAD_SIZE
+      ) {
+        this.warn(
           `[PROTO-RX] Invalid payload length=${len}; resynchronizing`
         );
 
@@ -424,11 +751,21 @@ export class BinaryProtocol {
       }
 
       const totalExpectedLength =
-        2 + 1 + 2 + len + 1 + 2;
+        2 +       // MAGIC
+        1 +       // CMD
+        2 +       // LEN
+        len +     // PAYLOAD
+        1 +       // CHECKSUM
+        2;        // TRAILER
 
       /*
-       * Complete frame has not arrived yet.
-       * Keep everything from AA55 onward.
+       * Complete frame has not arrived.
+       *
+       * DO NOT advance i.
+       *
+       * This is essential for Bluetooth SPP/TCP because
+       * one binary packet can be split across multiple
+       * transport reads.
        */
       if (
         i + totalExpectedLength >
@@ -437,8 +774,11 @@ export class BinaryProtocol {
         break;
       }
 
-      const payloadStart = i + 5;
-      const payloadEnd = payloadStart + len;
+      const payloadStart =
+        i + 5;
+
+      const payloadEnd =
+        payloadStart + len;
 
       const payload =
         streamBuffer.slice(
@@ -455,23 +795,44 @@ export class BinaryProtocol {
       const trailer2 =
         streamBuffer[payloadEnd + 2];
 
-      const expectedChecksum =
-        this.computeChecksum(
-          cmd,
-          len,
-          payload
+      let expectedChecksum: number;
+
+      try {
+        expectedChecksum =
+          this.computeChecksum(
+            cmd,
+            len,
+            payload
+          );
+      } catch (error) {
+        this.warn(
+          `[PROTO-RX] Checksum calculation failed: ${String(error)}`
         );
 
+        /*
+         * Move one byte only and continue resynchronization.
+         */
+        i++;
+        continue;
+      }
+
       const checksumValid =
-        checksum === expectedChecksum;
+        checksum ===
+        expectedChecksum;
 
       const trailerValid =
-        trailer1 === this.TRAILER_BYTE_1 &&
-        trailer2 === this.TRAILER_BYTE_2;
+        trailer1 ===
+          this.TRAILER_BYTE_1 &&
+        trailer2 ===
+          this.TRAILER_BYTE_2;
 
-      if (!checksumValid || !trailerValid) {
-        console.warn(
-          `[PROTO-RX] CORRUPTED_PACKET offset=${i} ` +
+      if (
+        !checksumValid ||
+        !trailerValid
+      ) {
+        this.warn(
+          `[PROTO-RX] CORRUPTED_PACKET ` +
+          `offset=${i} ` +
           `CMD=0x${cmd
             .toString(16)
             .padStart(2, '0')
@@ -484,12 +845,21 @@ export class BinaryProtocol {
           `CS_EXPECTED=0x${expectedChecksum
             .toString(16)
             .padStart(2, '0')
+            .toUpperCase()} ` +
+          `TRAILER=0x${trailer1
+            .toString(16)
+            .padStart(2, '0')
+            .toUpperCase()} ` +
+          `0x${trailer2
+            .toString(16)
+            .padStart(2, '0')
             .toUpperCase()}`
         );
 
         /*
-         * Do not discard everything.
-         * Move one byte forward and search for the next AA55.
+         * Do not discard the whole buffer.
+         *
+         * Search for another AA55 sequence.
          */
         i++;
         continue;
@@ -508,30 +878,35 @@ export class BinaryProtocol {
           rawFrame
         );
 
-      /*
-       * decodePacket can mark malformed payloads
-       * invalid. Do not expose malformed CAN packets
-       * as valid packets.
-       */
       if (decoded.isValid) {
         packets.push(decoded);
       } else {
-        console.warn(
-          `[PROTO-RX] INVALID_PACKET CMD=0x${cmd
+        this.warn(
+          `[PROTO-RX] INVALID_PACKET ` +
+          `CMD=0x${cmd
             .toString(16)
             .padStart(2, '0')
-            .toUpperCase()} LEN=${len}`
+            .toUpperCase()} ` +
+          `LEN=${len}`
         );
       }
 
-      i += totalExpectedLength;
+      /*
+       * This complete frame has been consumed.
+       */
+      i +=
+        totalExpectedLength;
     }
 
     /*
-     * Keep only unprocessed bytes.
+     * Preserve every byte that has not been completely
+     * processed.
      *
-     * If the parser stopped at a partial AA55 frame,
-     * those bytes remain for the next transport read.
+     * Especially important:
+     * - partial AA55 header
+     * - partial CMD/LEN
+     * - partial payload
+     * - partial checksum/trailer
      */
     const remainingBuffer =
       streamBuffer.slice(i);
@@ -543,29 +918,36 @@ export class BinaryProtocol {
   }
 
   /**
-   * Decode one validated binary packet.
+   * Decode one already validated binary packet.
+   *
+   * Framing checksum/trailer validation has already happened
+   * inside parseStream().
    */
   private static decodePacket(
     cmd: BinaryCommand,
     payload: Uint8Array,
     rawFrame: Uint8Array
   ): DecodedBinaryPacket {
-    const result: DecodedBinaryPacket = {
-      cmd,
-      payload,
-      rawFrame,
-      isValid: true
-    };
+    const result:
+      DecodedBinaryPacket = {
+        cmd,
+        payload,
+        rawFrame,
+        isValid: true
+      };
 
-    // ----------------------------------------------------------
+    // ==========================================================
     // CAN FRAME
-    // ----------------------------------------------------------
-    if (cmd === BinaryCommand.CMD_CAN_FRAME) {
+    // ==========================================================
+    if (
+      cmd ===
+      BinaryCommand.CMD_CAN_FRAME
+    ) {
       if (
         payload.length <
         this.CAN_MIN_PAYLOAD_SIZE
       ) {
-        console.warn(
+        this.warn(
           `[CAN-RX] Invalid CAN payload length=${payload.length}`
         );
 
@@ -574,32 +956,46 @@ export class BinaryProtocol {
       }
 
       const canId =
-        (((payload[0] << 24) |
+        (
+          (payload[0] << 24) |
           (payload[1] << 16) |
           (payload[2] << 8) |
-          payload[3]) >>> 0);
+          payload[3]
+        ) >>> 0;
 
-      const flags = payload[4];
-      const dlc = payload[5];
+      const flags =
+        payload[4];
+
+      const dlc =
+        payload[5];
 
       /*
-       * Only bits 0 and 1 are currently defined:
-       * bit0 = EXT
-       * bit1 = RTR
+       * Only two flag bits are currently defined:
+       *
+       * bit 0 = EXT
+       * bit 1 = RTR
+       *
+       * Bits 2..7 must remain zero for the current protocol.
        */
-      if ((flags & 0xFC) !== 0) {
-        console.warn(
+      if (
+        (flags & 0xFC) !== 0
+      ) {
+        this.warn(
           `[CAN-RX] Invalid CAN flags=0x${flags
             .toString(16)
-            .padStart(2, '0')}`
+            .padStart(2, '0')
+            .toUpperCase()}`
         );
 
         result.isValid = false;
         return result;
       }
 
-      if (dlc > this.CAN_MAX_DLC) {
-        console.warn(
+      if (
+        dlc >
+        this.CAN_MAX_DLC
+      ) {
+        this.warn(
           `[CAN-RX] Invalid CAN DLC=${dlc}`
         );
 
@@ -607,12 +1003,22 @@ export class BinaryProtocol {
         return result;
       }
 
-      const requiredLength = 6 + dlc;
+      const requiredLength =
+        this.CAN_MIN_PAYLOAD_SIZE +
+        dlc;
 
-      if (payload.length < requiredLength) {
-        console.warn(
+      /*
+       * The current protocol does not allow a declared DLC
+       * to exceed the bytes actually present.
+       */
+      if (
+        payload.length <
+        requiredLength
+      ) {
+        this.warn(
           `[CAN-RX] CAN DLC/data mismatch: ` +
-          `DLC=${dlc}, payload=${payload.length}, ` +
+          `DLC=${dlc}, ` +
+          `payload=${payload.length}, ` +
           `required=${requiredLength}`
         );
 
@@ -627,16 +1033,33 @@ export class BinaryProtocol {
         (flags & 0x02) !== 0;
 
       /*
-       * Validate identifier according to frame type.
+       * Standard CAN identifier must be 11-bit.
        */
       if (
-        (!isExtended && canId > 0x7FF) ||
-        (isExtended && canId > 0x1FFFFFFF)
+        !isExtended &&
+        canId > 0x7FF
       ) {
-        console.warn(
-          `[CAN-RX] Invalid CAN ID=0x${canId
+        this.warn(
+          `[CAN-RX] Invalid standard CAN ID=0x${canId
             .toString(16)
-            .toUpperCase()} EXT=${isExtended}`
+            .toUpperCase()}`
+        );
+
+        result.isValid = false;
+        return result;
+      }
+
+      /*
+       * Extended CAN identifier must be <= 29-bit.
+       */
+      if (
+        isExtended &&
+        canId > 0x1FFFFFFF
+      ) {
+        this.warn(
+          `[CAN-RX] Invalid extended CAN ID=0x${canId
+            .toString(16)
+            .toUpperCase()}`
         );
 
         result.isValid = false;
@@ -645,28 +1068,43 @@ export class BinaryProtocol {
 
       const dataBytes =
         Array.from(
-          payload.slice(6, 6 + dlc)
+          payload.slice(
+            6,
+            6 + dlc
+          )
         );
 
       const dataHex =
         dataBytes
-          .map(b =>
-            b.toString(16)
-              .padStart(2, '0')
-              .toUpperCase()
+          .map(
+            byte =>
+              byte
+                .toString(16)
+                .padStart(2, '0')
+                .toUpperCase()
           )
           .join(' ');
 
-      const idHex = isExtended
-        ? `0x${canId
-            .toString(16)
-            .padStart(8, '0')
-            .toUpperCase()}`
-        : `0x${canId
-            .toString(16)
-            .padStart(3, '0')
-            .toUpperCase()}`;
+      const idHex =
+        isExtended
+          ? `0x${canId
+              .toString(16)
+              .padStart(8, '0')
+              .toUpperCase()}`
+          : `0x${canId
+              .toString(16)
+              .padStart(3, '0')
+              .toUpperCase()}`;
 
+      /*
+       * Preserve the current CanFrame shape for compatibility.
+       *
+       * RTR is part of the binary frame flags, but the current
+       * CanFrame type/API shown in this project does not expose
+       * an isRtr property. We therefore do NOT invent a new
+       * field here. The next types/protocol revision should add
+       * it properly.
+       */
       result.canFrame = {
         id: idHex,
         dlc,
@@ -676,8 +1114,14 @@ export class BinaryProtocol {
         isExtended
       };
 
-      console.log(
-        `[CAN-RX-PACKET] ID=${idHex} ` +
+      /*
+       * Do not log every received CAN frame by default.
+       * CAN traffic can be hundreds/thousands of frames per
+       * second and console logging can itself cause UI lag.
+       */
+      this.debug(
+        `[CAN-RX-PACKET] ` +
+        `ID=${idHex} ` +
         `EXT=${isExtended ? 1 : 0} ` +
         `RTR=${isRtr ? 1 : 0} ` +
         `DLC=${dlc} ` +
@@ -687,12 +1131,17 @@ export class BinaryProtocol {
       return result;
     }
 
-    // ----------------------------------------------------------
+    // ==========================================================
     // PONG
-    // ----------------------------------------------------------
-    if (cmd === BinaryCommand.CMD_PONG) {
-      if (payload.length < 9) {
-        console.warn(
+    // ==========================================================
+    if (
+      cmd ===
+      BinaryCommand.CMD_PONG
+    ) {
+      if (
+        payload.length < 9
+      ) {
+        this.warn(
           `[PONG] Invalid payload length=${payload.length}`
         );
 
@@ -701,19 +1150,23 @@ export class BinaryProtocol {
       }
 
       const uptimeMs =
-        (((payload[0] << 24) |
+        (
+          (payload[0] << 24) |
           (payload[1] << 16) |
           (payload[2] << 8) |
-          payload[3]) >>> 0);
+          payload[3]
+        ) >>> 0;
 
       const canReady =
         payload[4] === 0x01;
 
       const freeHeapBytes =
-        (((payload[5] << 24) |
+        (
+          (payload[5] << 24) |
           (payload[6] << 16) |
           (payload[7] << 8) |
-          payload[8]) >>> 0);
+          payload[8]
+        ) >>> 0;
 
       result.pongInfo = {
         uptimeMs,
@@ -724,29 +1177,30 @@ export class BinaryProtocol {
       return result;
     }
 
-    // ----------------------------------------------------------
+    // ==========================================================
     // CAN STATUS
-    // ----------------------------------------------------------
+    // ==========================================================
     if (
-      cmd === BinaryCommand.CMD_CAN_STATUS_RESP
+      cmd ===
+      BinaryCommand.CMD_CAN_STATUS_RESP
     ) {
       /*
-       * Current ESP32 firmware sends exactly 21 bytes.
+       * Current ESP32 firmware sends:
        *
-       * Used fields:
-       * 0      State
-       * 1..4   Speed
-       * 5      TX error
-       * 6      RX error
-       * 7..8   RX overrun
-       * 9      RX queue
-       * 10..13 Messages sent
-       * 14..17 Messages received
-       *
-       * Bytes 18..20 are currently reserved/unused.
+       * 0       State
+       * 1..4    Speed
+       * 5       TX error
+       * 6       RX error
+       * 7..8    RX overrun
+       * 9       RX queue
+       * 10..13  Messages sent
+       * 14..17  Messages received
+       * 18..20  Currently unused/reserved
        */
-      if (payload.length < 21) {
-        console.warn(
+      if (
+        payload.length < 21
+      ) {
+        this.warn(
           `[CAN-STATUS] Invalid payload length=${payload.length}, expected >=21`
         );
 
@@ -754,13 +1208,16 @@ export class BinaryProtocol {
         return result;
       }
 
-      const stateCode = payload[0];
+      const stateCode =
+        payload[0];
 
       const speed =
-        (((payload[1] << 24) |
+        (
+          (payload[1] << 24) |
           (payload[2] << 16) |
           (payload[3] << 8) |
-          payload[4]) >>> 0);
+          payload[4]
+        ) >>> 0;
 
       const txErrorCount =
         payload[5];
@@ -769,49 +1226,73 @@ export class BinaryProtocol {
         payload[6];
 
       const busOverrunCount =
-        ((payload[7] << 8) |
-          payload[8]) >>> 0;
+        (
+          (payload[7] << 8) |
+          payload[8]
+        ) >>> 0;
 
       const queueSize =
         payload[9];
 
       const messagesSent =
-        (((payload[10] << 24) |
+        (
+          (payload[10] << 24) |
           (payload[11] << 16) |
           (payload[12] << 8) |
-          payload[13]) >>> 0);
+          payload[13]
+        ) >>> 0;
 
       const messagesReceived =
-        (((payload[14] << 24) |
+        (
+          (payload[14] << 24) |
           (payload[15] << 16) |
           (payload[16] << 8) |
-          payload[17]) >>> 0);
+          payload[17]
+        ) >>> 0;
 
-      let stateStr: CanBusStatus['state'] =
+      let stateStr:
+        CanBusStatus['state'] =
         'READY';
 
-      if (stateCode === 1) {
+      if (
+        stateCode === 1
+      ) {
         stateStr = 'STOPPED';
-      } else if (stateCode === 2) {
+      } else if (
+        stateCode === 2
+      ) {
         stateStr = 'BUS_OFF';
-      } else if (stateCode === 3) {
+      } else if (
+        stateCode === 3
+      ) {
         stateStr = 'ERROR';
-      } else if (stateCode === 4) {
+      } else if (
+        stateCode === 4
+      ) {
         stateStr = 'RECOVERING';
       }
 
       /*
        * IMPORTANT:
-       * The current ESP32 status packet does NOT contain
-       * a CAN extended/standard mode field.
        *
-       * Therefore we must not invent 29-bit/11-bit information.
-       * Keep the existing type-compatible default until the
-       * protocol is extended properly.
+       * The current ESP32 status payload contains no field
+       * describing whether the configured CAN addressing is
+       * standard 11-bit or extended 29-bit.
+       *
+       * Therefore there is no legitimate way to derive the
+       * mode from this packet.
+       *
+       * The current CanBusStatus type/API requires a mode
+       * value, so the legacy value is retained solely for
+       * TypeScript/API compatibility. The actual CAN frame
+       * itself remains authoritative through canFrame.isExtended.
+       *
+       * This must be corrected at the type/protocol level in
+       * the next coordinated firmware revision.
        */
       result.canStatus = {
         state: stateStr,
-        speed: speed || 500000,
+        speed,
         mode: '11-BIT',
         txErrorCount,
         rxErrorCount,
@@ -824,14 +1305,17 @@ export class BinaryProtocol {
       return result;
     }
 
-    // ----------------------------------------------------------
+    // ==========================================================
     // K-LINE INIT RESPONSE
-    // ----------------------------------------------------------
+    // ==========================================================
     if (
-      cmd === BinaryCommand.CMD_KLINE_INIT_RESP
+      cmd ===
+      BinaryCommand.CMD_KLINE_INIT_RESP
     ) {
-      if (payload.length < 2) {
-        console.warn(
+      if (
+        payload.length < 2
+      ) {
+        this.warn(
           `[KLINE-INIT] Invalid payload length=${payload.length}`
         );
 
@@ -855,44 +1339,75 @@ export class BinaryProtocol {
           ? payload[3]
           : 0;
 
-      let protoText: ProtocolType =
+      let protoText:
+        ProtocolType =
         'ISO 9141-2';
 
-      if (protoByte === 0x01) {
+      if (
+        protoByte === 0x01
+      ) {
         protoText =
           'ISO 15765-4 (CAN 11/500)';
-      } else if (protoByte === 0x02) {
+      } else if (
+        protoByte === 0x02
+      ) {
         protoText =
           'ISO 15765-4 (CAN 29/500)';
-      } else if (protoByte === 0x03) {
+      } else if (
+        protoByte === 0x03
+      ) {
         protoText =
           'ISO 15765-4 (CAN 11/250)';
-      } else if (protoByte === 0x04) {
+      } else if (
+        protoByte === 0x04
+      ) {
         protoText =
           'ISO 15765-4 (CAN 29/250)';
-      } else if (protoByte === 0x06) {
+      } else if (
+        protoByte === 0x06
+      ) {
         protoText =
           'ISO 14230-4 (KWP2000 Fast)';
-      } else if (protoByte === 0x07) {
+      } else if (
+        protoByte === 0x07
+      ) {
         protoText =
           'ISO 14230-4 (KWP2000 Slow)';
-      } else if (protoByte === 0x05) {
+      } else if (
+        protoByte === 0x05
+      ) {
         protoText =
           'ISO 9141-2';
       }
 
-      let statusText = 'SUCCESS';
+      let statusText =
+        'SUCCESS';
 
-      if (statusCode === 0x01) {
-        statusText = 'NO_KLINE_VOLTAGE';
-      } else if (statusCode === 0x02) {
-        statusText = 'INIT_FAILED';
-      } else if (statusCode === 0x03) {
-        statusText = 'KEYBYTE_MISMATCH';
-      } else if (statusCode === 0x04) {
-        statusText = 'ECU_NO_RESPONSE';
-      } else if (statusCode === 0x05) {
-        statusText = 'CHECKSUM_ERROR';
+      if (
+        statusCode === 0x01
+      ) {
+        statusText =
+          'NO_KLINE_VOLTAGE';
+      } else if (
+        statusCode === 0x02
+      ) {
+        statusText =
+          'INIT_FAILED';
+      } else if (
+        statusCode === 0x03
+      ) {
+        statusText =
+          'KEYBYTE_MISMATCH';
+      } else if (
+        statusCode === 0x04
+      ) {
+        statusText =
+          'ECU_NO_RESPONSE';
+      } else if (
+        statusCode === 0x05
+      ) {
+        statusText =
+          'CHECKSUM_ERROR';
       }
 
       result.klineInitResp = {
@@ -903,23 +1418,30 @@ export class BinaryProtocol {
       };
 
       result.klineInitResult = {
-        success: statusCode === 0x00,
-        activeProtocol: protoByte,
-        keyByte1: kb1,
-        keyByte2: kb2
+        success:
+          statusCode === 0x00,
+        activeProtocol:
+          protoByte,
+        keyByte1:
+          kb1,
+        keyByte2:
+          kb2
       };
 
       return result;
     }
 
-    // ----------------------------------------------------------
+    // ==========================================================
     // K-LINE FRAME RESPONSE
-    // ----------------------------------------------------------
+    // ==========================================================
     if (
-      cmd === BinaryCommand.CMD_KLINE_FRAME
+      cmd ===
+      BinaryCommand.CMD_KLINE_FRAME
     ) {
-      if (payload.length < 1) {
-        console.warn(
+      if (
+        payload.length < 1
+      ) {
+        this.warn(
           `[KLINE-FRAME] Invalid empty response`
         );
 
@@ -931,14 +1453,18 @@ export class BinaryProtocol {
         payload[0];
 
       const dataBytes =
-        Array.from(payload.slice(1));
+        Array.from(
+          payload.slice(1)
+        );
 
       const rawHex =
         dataBytes
-          .map(b =>
-            b.toString(16)
-              .padStart(2, '0')
-              .toUpperCase()
+          .map(
+            byte =>
+              byte
+                .toString(16)
+                .padStart(2, '0')
+                .toUpperCase()
           )
           .join(' ');
 
@@ -949,21 +1475,26 @@ export class BinaryProtocol {
       };
 
       result.klineFrameResult = {
-        status: statusCode,
-        data: dataBytes
+        status:
+          statusCode,
+        data:
+          dataBytes
       };
 
       return result;
     }
 
-    // ----------------------------------------------------------
+    // ==========================================================
     // K-LINE STATUS
-    // ----------------------------------------------------------
+    // ==========================================================
     if (
-      cmd === BinaryCommand.CMD_KLINE_STATUS_RESP
+      cmd ===
+      BinaryCommand.CMD_KLINE_STATUS_RESP
     ) {
-      if (payload.length < 7) {
-        console.warn(
+      if (
+        payload.length < 7
+      ) {
+        this.warn(
           `[KLINE-STATUS] Invalid payload length=${payload.length}`
         );
 
@@ -981,37 +1512,54 @@ export class BinaryProtocol {
         payload[2] === 0x01;
 
       const rxErrorCount =
-        ((payload[3] << 8) |
-          payload[4]) >>> 0;
+        (
+          (payload[3] << 8) |
+          payload[4]
+        ) >>> 0;
 
       const txErrorCount =
-        ((payload[5] << 8) |
-          payload[6]) >>> 0;
+        (
+          (payload[5] << 8) |
+          payload[6]
+        ) >>> 0;
 
       const errCodeByte =
         payload.length >= 8
           ? payload[7]
           : 0;
 
-      let protoText: ProtocolType =
+      let protoText:
+        ProtocolType =
         'ISO 9141-2';
 
-      if (protoByte === 0x01) {
+      if (
+        protoByte === 0x01
+      ) {
         protoText =
           'ISO 15765-4 (CAN 11/500)';
-      } else if (protoByte === 0x02) {
+      } else if (
+        protoByte === 0x02
+      ) {
         protoText =
           'ISO 15765-4 (CAN 29/500)';
-      } else if (protoByte === 0x03) {
+      } else if (
+        protoByte === 0x03
+      ) {
         protoText =
           'ISO 15765-4 (CAN 11/250)';
-      } else if (protoByte === 0x04) {
+      } else if (
+        protoByte === 0x04
+      ) {
         protoText =
           'ISO 15765-4 (CAN 29/250)';
-      } else if (protoByte === 0x06) {
+      } else if (
+        protoByte === 0x06
+      ) {
         protoText =
           'ISO 14230-4 (KWP2000 Fast)';
-      } else if (protoByte === 0x07) {
+      } else if (
+        protoByte === 0x07
+      ) {
         protoText =
           'ISO 14230-4 (KWP2000 Slow)';
       }
@@ -1020,38 +1568,56 @@ export class BinaryProtocol {
         KlineStatus['lastErrorCode'] =
         'KLINE_OK';
 
-      if (errCodeByte === 0x01) {
+      if (
+        errCodeByte === 0x01
+      ) {
         lastErr =
           'NO_KLINE_VOLTAGE';
-      } else if (errCodeByte === 0x02) {
+      } else if (
+        errCodeByte === 0x02
+      ) {
         lastErr =
           'INIT_FAILED';
-      } else if (errCodeByte === 0x03) {
+      } else if (
+        errCodeByte === 0x03
+      ) {
         lastErr =
           'NO_ECU_RESPONSE';
-      } else if (errCodeByte === 0x04) {
+      } else if (
+        errCodeByte === 0x04
+      ) {
         lastErr =
           'CHECKSUM_ERROR';
-      } else if (errCodeByte === 0x05) {
+      } else if (
+        errCodeByte === 0x05
+      ) {
         lastErr =
           'TIMEOUT';
       }
 
       result.klineStatus = {
         voltageOk,
-        activeProtocol: protoText,
+        activeProtocol:
+          protoText,
         initialized,
         rxErrorCount,
         txErrorCount,
-        lastErrorCode: lastErr
+        lastErrorCode:
+          lastErr
       };
 
       return result;
     }
 
+    // ==========================================================
+    // UNKNOWN COMMAND
+    // ==========================================================
     /*
-     * Unknown commands are still considered valid at the
-     * binary framing level. This preserves forward compatibility.
+     * Framing was valid, therefore unknown commands are still
+     * valid binary packets.
+     *
+     * This allows newer firmware to add commands without
+     * breaking older application versions.
      */
     return result;
   }
@@ -1059,7 +1625,8 @@ export class BinaryProtocol {
   /**
    * Configure protocol.
    *
-   * ESP32 IDs:
+   * ESP32 protocol IDs:
+   *
    * 0x00 = AUTO
    * 0x01 = CAN 11/500
    * 0x02 = CAN 29/500
@@ -1084,7 +1651,9 @@ export class BinaryProtocol {
 
     return this.wrapPacket(
       BinaryCommand.CMD_CONFIG_PROTOCOL,
-      new Uint8Array([protocolId])
+      new Uint8Array([
+        protocolId
+      ])
     );
   }
 
@@ -1106,7 +1675,9 @@ export class BinaryProtocol {
 
     return this.wrapPacket(
       BinaryCommand.CMD_KLINE_INIT,
-      new Uint8Array([protocolId])
+      new Uint8Array([
+        protocolId
+      ])
     );
   }
 
@@ -1116,15 +1687,29 @@ export class BinaryProtocol {
   public static encodeKlineFrame(
     frameBytes: number[]
   ): Uint8Array {
-    if (!Array.isArray(frameBytes)) {
+    if (
+      !Array.isArray(frameBytes)
+    ) {
       throw new Error(
         '[PROTO] K-Line frame must be an array'
       );
     }
 
     if (
-      frameBytes.length === 0 ||
-      frameBytes.length > this.MAX_PAYLOAD_SIZE
+      frameBytes.length === 0
+    ) {
+      throw new Error(
+        '[PROTO] K-Line frame cannot be empty'
+      );
+    }
+
+    /*
+     * MAX_PAYLOAD_SIZE applies to the binary packet payload.
+     * K-Line frame is itself the payload here.
+     */
+    if (
+      frameBytes.length >
+      this.MAX_PAYLOAD_SIZE
     ) {
       throw new Error(
         `[PROTO] Invalid K-Line frame length=${frameBytes.length}`
@@ -1132,10 +1717,20 @@ export class BinaryProtocol {
     }
 
     const payload =
-      new Uint8Array(frameBytes.length);
+      new Uint8Array(
+        frameBytes.length
+      );
 
-    for (let i = 0; i < frameBytes.length; i++) {
-      payload[i] = frameBytes[i] & 0xFF;
+    for (
+      let i = 0;
+      i < frameBytes.length;
+      i++
+    ) {
+      payload[i] =
+        this.normalizeByte(
+          frameBytes[i],
+          `K-Line frame[${i}]`
+        );
     }
 
     return this.wrapPacket(
