@@ -8,6 +8,7 @@ export class CanManager {
   private throttleTimer: any = null;
   private filterId: string = '';
   private isPaused: boolean = false;
+  private seqCounter = 0;
 
   public subscribe(listener: (frames: CanFrame[]) => void) {
     this.listeners.push(listener);
@@ -32,6 +33,7 @@ export class CanManager {
   public addFrame(frame: Partial<CanFrame> & { id: string; dlc: number; dataHex: string; dataBytes: number[]; direction: 'Rx' | 'Tx' }): CanFrame {
     const fullFrame: CanFrame = {
       ...frame,
+      seq: frame.seq || ++this.seqCounter,
       timestamp: frame.timestamp || new Date().toLocaleTimeString(),
       isExtended: frame.isExtended || false,
       description: frame.description || ''

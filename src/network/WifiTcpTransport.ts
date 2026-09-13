@@ -222,12 +222,12 @@ export class WifiTcpTransport implements ITransport {
       return true;
     }
 
-    if (this.status === 'CONNECTED') {
+    if ((this.status as ConnectionStatus) === 'CONNECTED') {
       return true;
     }
 
     if (this.connectPromiseActive) {
-      return this.status === 'CONNECTED';
+      return (this.status as ConnectionStatus) === 'CONNECTED';
     }
 
     this.connectPromiseActive = true;

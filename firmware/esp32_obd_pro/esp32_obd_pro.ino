@@ -1,3074 +1,671 @@
-/**
- * HAMZA OBD PRO - Bluetooth Classic SPP Transport
- *
- * Real Bluetooth Classic SPP transport for the ESP32 OBD adapter.
- *
- * Responsibilities:
- * - Connect/disconnect Bluetooth SPP
- * - Send/receive binary transport frames
- * - Parse incoming BinaryProtocol frames
- * - Forward decoded CAN frames to diagnostic layers
- * - Handle ping/CAN-status/K-Line responses
- *
- * Diagnostic decoding (OBD-II / ISO-TP / UDS) remains outside
- * this transport layer.
+/*
+ * ============================================================================
+ * HAMZA OBD PRO v3 FINAL - ESP32 Dual-Transport (Wi-Fi TCP + Bluetooth Classic SPP)
+ * ============================================================================
+ * Features:
+ *  - Native TWAI (Two-Wire Automotive Interface / CAN 2.0B) @ 500kbps / 250kbps
+ *  - CAN TX: GPIO22 | CAN RX: GPIO21 (ISO 15765-4 Standard)
+ *  - K-Line RX: GPIO16 | K-Line TX: GPIO17 (ISO 9141-2 / ISO 14230-4 KWP2000)
+ *  - Bluetooth Classic SPP (BluetoothSerial: "ESP32-OBD-PRO")
+ *  - Wi-Fi Access Point ("ESP32-OBD-PRO", 192.168.4.1) + TCP Server (Port 35000)
+ *  - Unified HAMZA OBD Binary Framing Protocol (Magic: 0xAA 0x55)
+ * ============================================================================
  */
 
-import {
-  ConnectionConfig,
-  ConnectionStatus,
-  CanFrame,
-  CanBusStatus,
-  TransportType,
-  BluetoothDeviceInfo
-} from '../types';
+#include <Arduino.h>
+#include <WiFi.h>
+#include "BluetoothSerial.h"
+#include "driver/twai.h"
+#include "esp_system.h"
 
-import {
-  ITransport,
-  PingResult
-} from './Transport';
+// ----------------------------------------------------------------------------
+// Configuration & Pin Definitions
+// ----------------------------------------------------------------------------
+#define CAN_TX_PIN                GPIO_NUM_22
+#define CAN_RX_PIN                GPIO_NUM_21
+#define CAN_DEFAULT_SPEED_KBPS    500
 
-import {
-  BinaryProtocol,
-  BinaryCommand,
-  DecodedBinaryPacket
-} from './binaryProtocol';
+#define KLINE_RX_PIN              GPIO_NUM_16
+#define KLINE_TX_PIN              GPIO_NUM_17
+#define KLINE_BAUDRATE            10400
 
-import {
-  commLogger
-} from '../logging/logger';
+#define WIFI_AP_SSID              "ESP32-OBD-PRO"
+#define WIFI_AP_PASS              "12345678"
+#define TCP_SERVER_PORT           35000
 
-import {
-  canManager
-} from '../can/canManager';
+#define BT_DEVICE_NAME            "ESP32-OBD-PRO"
 
-import {
-  mockEcuServer
-} from './mockEcuServer';
+#define STATUS_LED_PIN            2
 
-import {
-  BluetoothSpp
-} from './BluetoothSppPlugin';
+uint32_t currentCanSpeedKbps = CAN_DEFAULT_SPEED_KBPS;
+bool enableRawCanLogging = false;
 
-import {
-  Capacitor
-} from '@capacitor/core';
+// K-Line Protocol IDs
+#define KLINE_PROTO_AUTO          0x00
+#define KLINE_PROTO_CAN_11_500    0x01
+#define KLINE_PROTO_CAN_29_500    0x02
+#define KLINE_PROTO_CAN_11_250    0x03
+#define KLINE_PROTO_CAN_29_250    0x04
+#define KLINE_PROTO_ISO9141_SLOW  0x05
+#define KLINE_PROTO_KWP2000_FAST  0x06
+#define KLINE_PROTO_KWP2000_SLOW  0x07
 
-console.log(
-  '[BUILD-ID] BT-TRANSPORT-AUDITED-V5-20260912'
-);
+// K-Line Status Codes
+#define KLINE_STATUS_SUCCESS            0x00
+#define KLINE_STATUS_NO_VOLTAGE         0x01
+#define KLINE_STATUS_INIT_FAILED        0x02
+#define KLINE_STATUS_KEYBYTE_MISMATCH   0x03
+#define KLINE_STATUS_ECU_NO_RESPONSE    0x04
+#define KLINE_STATUS_CHECKSUM_ERROR     0x05
 
-export class BluetoothSppTransport implements ITransport {
+// Binary Protocol Constants
+#define PROTOCOL_MAGIC_1          0xAA
+#define PROTOCOL_MAGIC_2          0x55
+#define PROTOCOL_TRAILER_1        0x0D
+#define PROTOCOL_TRAILER_2        0x0A
 
-  public readonly type: TransportType =
-    'BLUETOOTH_SPP';
+#define CMD_CAN_FRAME             0x01
+#define CMD_PING                  0x02
+#define CMD_PONG                  0x03
+#define CMD_CAN_STATUS_REQ        0x04
+#define CMD_CAN_STATUS_RESP       0x05
+#define CMD_CONFIG_CAN            0x06
+#define CMD_HEARTBEAT             0x07
+#define CMD_CONFIG_PROTOCOL       0x08
+#define CMD_KLINE_INIT            0x09
+#define CMD_KLINE_INIT_RESP       0x0A
+#define CMD_KLINE_FRAME           0x0B
+#define CMD_KLINE_STATUS_REQ      0x0C
+#define CMD_KLINE_STATUS_RESP     0x0D
 
-  private config: ConnectionConfig;
+// ----------------------------------------------------------------------------
+// Global Instances & Buffers
+// ----------------------------------------------------------------------------
+BluetoothSerial SerialBT;
+WiFiServer tcpServer(TCP_SERVER_PORT);
+WiFiClient tcpClient;
 
-  private status: ConnectionStatus =
-    'DISCONNECTED';
+struct SystemStats {
+  uint32_t messagesSent;
+  uint32_t messagesReceived;
+  uint32_t txErrorCount;
+  uint32_t rxErrorCount;
+  uint32_t busOverruns;
+  bool canInitialized;
+  bool btConnected;
+  bool wifiClientConnected;
+} stats = {0, 0, 0, 0, 0, false, false, false};
 
-  private rawState: string =
-    'DISCONNECTED';
+struct KlineState {
+  bool initialized;
+  uint8_t activeProtocol;
+  uint8_t keyByte1;
+  uint8_t keyByte2;
+  uint16_t rxErrorCount;
+  uint16_t txErrorCount;
+  uint8_t lastErrorCode;
+} klineState = {false, KLINE_PROTO_ISO9141_SLOW, 0x00, 0x00, 0, 0, KLINE_STATUS_SUCCESS};
 
-  private lastError: Error | null = null;
+#define RX_STREAM_BUF_SIZE 512
+uint8_t wifiRxBuf[RX_STREAM_BUF_SIZE];
+size_t wifiRxHead = 0;
 
-  private lastErrorStackTrace:
-    string | null = null;
+uint8_t btRxBuf[RX_STREAM_BUF_SIZE];
+size_t btRxHead = 0;
 
-  /**
-   * Binary protocol RX stream buffer.
-   *
-   * Bluetooth SPP is a stream. One frame can arrive in several
-   * chunks, or several frames can arrive in one chunk.
-   */
-  private rxBuffer: Uint8Array =
-    new Uint8Array(0);
+void initCAN(uint32_t speedKbps);
+bool checkKlineVoltage();
+void klineFlushRxEcho(size_t expectedEchoCount);
+uint8_t initKlineIso9141();
+uint8_t initKlineKwpFast();
+uint8_t transceiveKlineFrame(const uint8_t* txData, size_t txLen, uint8_t* rxBuf, size_t& rxLen, uint32_t timeoutMs);
+void processStreamBuffer(uint8_t* buffer, size_t& head, bool fromBluetooth);
+void handleParsedCommand(uint8_t cmd, uint16_t len, const uint8_t* payload, bool fromBluetooth);
+void broadcastBinaryPacket(uint8_t cmd, const uint8_t* payload, uint16_t len);
+void sendPong(bool toBluetooth);
+void sendCanStatus(bool toBluetooth);
+void sendKlineStatus(bool toBluetooth);
+uint8_t calculateChecksum(uint8_t cmd, uint16_t len, const uint8_t* payload);
 
-  /**
-   * Kept isolated for legacy ELM-compatible ASCII parsing.
-   *
-   * IMPORTANT:
-   * This buffer is NEVER mixed with rxBuffer.
-   */
-  private asciiRxBuffer: string = '';
+bool checkKlineIdleState() {
+  pinMode(KLINE_RX_PIN, INPUT_PULLUP);
+  int lowCount = 0;
+  for (int i = 0; i < 50; i++) {
+    if (digitalRead(KLINE_RX_PIN) == LOW) lowCount++;
+    delayMicroseconds(1000);
+  }
+  if (lowCount >= 40) return false;
+  return true;
+}
 
-  /**
-   * Web Serial resources.
-   */
-  private serialPort: any = null;
-  private reader: any = null;
-  private writer: any = null;
+size_t stripTxEcho(const uint8_t* txBuf, size_t txLen, const uint8_t* rawRxBuf, size_t rawRxLen, uint8_t* cleanRxBuf) {
+  size_t echoCount = 0;
+  while (echoCount < txLen && echoCount < rawRxLen) {
+    if (rawRxBuf[echoCount] == txBuf[echoCount]) {
+      echoCount++;
+    } else {
+      break;
+    }
+  }
+  size_t cleanLen = 0;
+  for (size_t i = echoCount; i < rawRxLen; i++) {
+    cleanRxBuf[cleanLen++] = rawRxBuf[i];
+  }
+  return cleanLen;
+}
 
-  /**
-   * Native Bluetooth listener handles.
-   */
-  private nativeDataListener: any = null;
-  private nativeDisconnectListener: any = null;
+void klineFlushRxEcho(size_t expectedEchoCount) {
+  unsigned long start = millis();
+  size_t readCount = 0;
+  while (readCount < expectedEchoCount && (millis() - start) < 100) {
+    if (Serial2.available()) {
+      Serial2.read();
+      readCount++;
+    } else {
+      delay(1);
+    }
+  }
+}
 
-  /**
-   * State.
-   */
-  private isConnecting = false;
-  private isScanning = false;
-
-  /**
-   * Serialize all physical writes.
-   *
-   * A Bluetooth SPP connection is a byte stream, therefore
-   * concurrent writes must never be allowed to race.
-   */
-  private writeQueue:
-    Promise<void> = Promise.resolve();
-
-  /**
-   * Raw traffic logging is disabled by default.
-   *
-   * High-rate CAN traffic can generate thousands of packets.
-   * Logging every packet can freeze a WebView.
-   */
-  private readonly debugRawTraffic =
-    false;
-
-  /**
-   * Application listeners.
-   */
-  private stateListeners:
-    Array<
-      (
-        state: ConnectionStatus,
-        error?: string
-      ) => void
-    > = [];
-
-  private dataListeners:
-    Array<
-      (data: Uint8Array) => void
-    > = [];
-
-  private canFrameListeners:
-    Array<
-      (frame: CanFrame) => void
-    > = [];
-
-  private klinePacketListeners:
-    Array<
-      (pkt: DecodedBinaryPacket) => void
-    > = [];
-
-  /**
-   * One outstanding request of each response type.
-   */
-  private pingResolver:
-    ((res: PingResult) => void) | null =
-    null;
-
-  private pingStartTime:
-    number | null = null;
-
-  private pingTimeoutHandle:
-    ReturnType<typeof setTimeout> | null =
-    null;
-
-  private canStatusResolver:
-    ((status: CanBusStatus | null) => void) | null =
-    null;
-
-  private canStatusTimeoutHandle:
-    ReturnType<typeof setTimeout> | null =
-    null;
-
-  private klineInitResolver:
-    ((
-      res: {
-        success: boolean;
-        activeProtocol: number;
-        keyByte1: number;
-        keyByte2: number;
-      }
-    ) => void) | null =
-    null;
-
-  private klineInitTimeoutHandle:
-    ReturnType<typeof setTimeout> | null =
-    null;
-
-  private klineStatusResolver:
-    ((status: any) => void) | null =
-    null;
-
-  private klineStatusTimeoutHandle:
-    ReturnType<typeof setTimeout> | null =
-    null;
-
-  private klineFrameResolver:
-    ((
-      res: {
-        status: number;
-        data: number[];
-      }
-    ) => void) | null =
-    null;
-
-  private klineFrameTimeoutHandle:
-    ReturnType<typeof setTimeout> | null =
-    null;
-
-  constructor(
-    config: ConnectionConfig
-  ) {
-    this.config = config;
+uint8_t initKlineIso9141() {
+  if (!checkKlineIdleState()) {
+    klineState.initialized = false;
+    klineState.rxErrorCount++;
+    klineState.lastErrorCode = KLINE_STATUS_NO_VOLTAGE;
+    return KLINE_STATUS_NO_VOLTAGE;
   }
 
-  // ---------------------------------------------------------------------------
-  // STATE
-  // ---------------------------------------------------------------------------
+  Serial2.end();
+  pinMode(KLINE_TX_PIN, OUTPUT);
+  digitalWrite(KLINE_TX_PIN, HIGH);
+  delay(300);
 
-  public getState():
-    ConnectionStatus {
-    return this.status;
+  uint8_t addrBits[10] = {0, 1, 1, 0, 0, 1, 1, 0, 0, 1};
+  for (int i = 0; i < 10; i++) {
+    digitalWrite(KLINE_TX_PIN, addrBits[i] ? HIGH : LOW);
+    delay(200);
+  }
+  digitalWrite(KLINE_TX_PIN, HIGH);
+
+  Serial2.begin(KLINE_BAUDRATE, SERIAL_8N1, KLINE_RX_PIN, KLINE_TX_PIN);
+
+  unsigned long t0 = millis();
+  uint8_t syncByte = 0;
+  while ((millis() - t0) < 300) {
+    if (Serial2.available()) {
+      syncByte = Serial2.read();
+      break;
+    }
+    delay(1);
   }
 
-  public getRawConnectionState() {
-    return {
-      state: this.status,
-      rawState: this.rawState,
-      error: this.lastError
-        ? this.lastError.message
-        : null,
-      stackTrace:
-        this.lastErrorStackTrace
-    };
+  if (syncByte != 0x55) {
+    klineState.initialized = false;
+    klineState.rxErrorCount++;
+    klineState.lastErrorCode = KLINE_STATUS_INIT_FAILED;
+    return KLINE_STATUS_INIT_FAILED;
   }
 
-  public isConnected(): boolean {
-    return (
-      this.status === 'CONNECTED'
-    );
+  uint8_t kb1 = 0, kb2 = 0;
+  t0 = millis();
+  while ((millis() - t0) < 300 && !Serial2.available()) delay(1);
+  if (Serial2.available()) kb1 = Serial2.read();
+
+  t0 = millis();
+  while ((millis() - t0) < 300 && !Serial2.available()) delay(1);
+  if (Serial2.available()) kb2 = Serial2.read();
+
+  delay(30);
+
+  uint8_t invKb2 = ~kb2;
+  Serial2.write(invKb2);
+
+  t0 = millis();
+  while ((millis() - t0) < 50) {
+    if (Serial2.available()) {
+      uint8_t echo = Serial2.read();
+      if (echo == invKb2) break;
+    }
+    delay(1);
   }
 
-  public updateConfig(
-    config: ConnectionConfig
-  ): void {
-    this.config = config;
+  uint8_t invAddrResp = 0;
+  t0 = millis();
+  while ((millis() - t0) < 300) {
+    if (Serial2.available()) {
+      invAddrResp = Serial2.read();
+      break;
+    }
+    delay(1);
   }
 
-  public onStateChange(
-    callback: (
-      state: ConnectionStatus,
-      error?: string
-    ) => void
-  ): () => void {
-
-    this.stateListeners.push(
-      callback
-    );
-
-    callback(this.status);
-
-    return () => {
-      this.stateListeners =
-        this.stateListeners.filter(
-          listener =>
-            listener !== callback
-        );
-    };
+  if (invAddrResp != 0xCC) {
+    klineState.initialized = false;
+    klineState.rxErrorCount++;
+    klineState.lastErrorCode = KLINE_STATUS_INIT_FAILED;
+    return KLINE_STATUS_INIT_FAILED;
   }
 
-  public onData(
-    callback:
-      (data: Uint8Array) => void
-  ): () => void {
-
-    this.dataListeners.push(
-      callback
-    );
-
-    return () => {
-      this.dataListeners =
-        this.dataListeners.filter(
-          listener =>
-            listener !== callback
-        );
-    };
+  if ((kb1 == 0x8F && kb2 == 0x27) || ((kb2 & 0x80) && kb2 != 0xEA)) {
+    klineState.activeProtocol = KLINE_PROTO_KWP2000_SLOW;
+  } else {
+    klineState.activeProtocol = KLINE_PROTO_ISO9141_SLOW;
   }
 
-  public onCanFrame(
-    callback:
-      (frame: CanFrame) => void
-  ): () => void {
+  klineState.initialized = true;
+  klineState.keyByte1 = kb1;
+  klineState.keyByte2 = kb2;
+  klineState.lastErrorCode = KLINE_STATUS_SUCCESS;
+  return KLINE_STATUS_SUCCESS;
+}
 
-    this.canFrameListeners.push(
-      callback
-    );
-
-    return () => {
-      this.canFrameListeners =
-        this.canFrameListeners.filter(
-          listener =>
-            listener !== callback
-        );
-    };
+uint8_t initKlineKwpFast() {
+  if (!checkKlineIdleState()) {
+    klineState.initialized = false;
+    klineState.rxErrorCount++;
+    klineState.lastErrorCode = KLINE_STATUS_NO_VOLTAGE;
+    return KLINE_STATUS_NO_VOLTAGE;
   }
 
-  private setStatus(
-    newStatus: ConnectionStatus,
-    errorMsg?: string
-  ): void {
+  Serial2.end();
+  pinMode(KLINE_TX_PIN, OUTPUT);
+  digitalWrite(KLINE_TX_PIN, HIGH);
+  delay(300);
 
-    this.status =
-      newStatus;
+  digitalWrite(KLINE_TX_PIN, LOW);
+  delay(25);
+  digitalWrite(KLINE_TX_PIN, HIGH);
+  delay(25);
 
-    for (
-      const listener of [
-        ...this.stateListeners
-      ]
-    ) {
-      try {
-        listener(
-          newStatus,
-          errorMsg
-        );
-      } catch (error) {
-        console.error(
-          '[BT-STATE-LISTENER-ERROR]',
-          error
-        );
+  Serial2.begin(KLINE_BAUDRATE, SERIAL_8N1, KLINE_RX_PIN, KLINE_TX_PIN);
+
+  uint8_t startCommReq[5] = {0xC1, 0x33, 0xF1, 0x81, 0x66};
+  Serial2.write(startCommReq, 5);
+
+  uint8_t rawRx[32];
+  size_t rawRxLen = 0;
+  unsigned long t0 = millis();
+  while ((millis() - t0) < 300 && rawRxLen < 32) {
+    if (Serial2.available()) {
+      rawRx[rawRxLen++] = Serial2.read();
+      t0 = millis();
+    } else {
+      delay(2);
+    }
+  }
+
+  uint8_t cleanRx[32];
+  size_t cleanRxLen = stripTxEcho(startCommReq, 5, rawRx, rawRxLen, cleanRx);
+
+  if (cleanRxLen < 5) {
+    klineState.initialized = false;
+    klineState.rxErrorCount++;
+    klineState.lastErrorCode = KLINE_STATUS_ECU_NO_RESPONSE;
+    return KLINE_STATUS_ECU_NO_RESPONSE;
+  }
+
+  uint8_t cs = 0;
+  for (size_t i = 0; i < cleanRxLen - 1; i++) cs += cleanRx[i];
+
+  if (cs != cleanRx[cleanRxLen - 1]) {
+    klineState.initialized = false;
+    klineState.rxErrorCount++;
+    klineState.lastErrorCode = KLINE_STATUS_CHECKSUM_ERROR;
+    return KLINE_STATUS_CHECKSUM_ERROR;
+  }
+
+  klineState.initialized = true;
+  klineState.activeProtocol = KLINE_PROTO_KWP2000_FAST;
+  klineState.keyByte1 = cleanRxLen >= 6 ? cleanRx[4] : 0x8F;
+  klineState.keyByte2 = cleanRxLen >= 7 ? cleanRx[5] : 0xEA;
+  klineState.lastErrorCode = KLINE_STATUS_SUCCESS;
+  return KLINE_STATUS_SUCCESS;
+}
+
+uint8_t transceiveKlineFrame(const uint8_t* txData, size_t txLen, uint8_t* rxBuf, size_t& rxLen, uint32_t timeoutMs) {
+  if (!klineState.initialized) {
+    if (initKlineKwpFast() != KLINE_STATUS_SUCCESS) {
+      if (initKlineIso9141() != KLINE_STATUS_SUCCESS) {
+        return klineState.lastErrorCode;
       }
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // CONNECT
-  // ---------------------------------------------------------------------------
+  uint8_t frameTx[64];
+  size_t frameTxLen = 0;
 
-  public async connect(
-    overrideConfig?:
-      Partial<ConnectionConfig>
-  ): Promise<boolean> {
+  if (klineState.activeProtocol == KLINE_PROTO_ISO9141_SLOW) {
+    frameTx[0] = 0x68;
+    frameTx[1] = 0x6A;
+    frameTx[2] = 0xF1;
+    for (size_t i = 0; i < txLen; i++) frameTx[3 + i] = txData[i];
+    frameTxLen = 3 + txLen;
 
-    if (overrideConfig) {
-      this.config = {
-        ...this.config,
-        ...overrideConfig
-      };
-    }
+    uint8_t cs = 0;
+    for (size_t i = 0; i < frameTxLen; i++) cs += frameTx[i];
+    frameTx[frameTxLen++] = cs;
+  } else {
+    frameTx[0] = 0x80 | (txLen & 0x3F);
+    frameTx[1] = 0x33;
+    frameTx[2] = 0xF1;
+    for (size_t i = 0; i < txLen; i++) frameTx[3 + i] = txData[i];
+    frameTxLen = 3 + txLen;
 
-    if (
-      this.status === 'CONNECTED'
-    ) {
-      return true;
-    }
+    uint8_t cs = 0;
+    for (size_t i = 0; i < frameTxLen; i++) cs += frameTx[i];
+    frameTx[frameTxLen++] = cs;
+  }
 
-    if (this.isConnecting) {
-      console.warn(
-        '[BT-CONNECT] Connection already in progress'
-      );
+  Serial2.write(frameTx, frameTxLen);
 
-      return false;
-    }
-
-    this.isConnecting = true;
-
-    this.lastError = null;
-    this.lastErrorStackTrace = null;
-
-    this.rxBuffer =
-      new Uint8Array(0);
-
-    this.asciiRxBuffer = '';
-
-    this.setStatus(
-      'CONNECTING'
-    );
-
-    try {
-
-      // ---------------------------------------------------------
-      // MOCK
-      // ---------------------------------------------------------
-
-      if (
-        this.config.isMockMode
-      ) {
-
-        console.log(
-          '[BT-CONNECT] Mock mode explicitly enabled'
-        );
-
-        await new Promise(
-          resolve =>
-            setTimeout(
-              resolve,
-              300
-            )
-        );
-
-        mockEcuServer.start();
-
-        this.rawState =
-          'CONNECTED';
-
-        this.setStatus(
-          'CONNECTED'
-        );
-
-        return true;
-      }
-
-      // ---------------------------------------------------------
-      // WEB / SERIAL
-      // ---------------------------------------------------------
-
-      const isNative =
-        Capacitor.isNativePlatform();
-
-      if (!isNative) {
-
-        console.log(
-          '[BT-CONNECT] Non-native runtime'
-        );
-
-        if (
-          typeof navigator ===
-            'undefined' ||
-          !('serial' in navigator)
-        ) {
-          throw new Error(
-            'Native Bluetooth Classic SPP is required on Android. Web Serial is available only where supported.'
-          );
-        }
-
-        const port =
-          await (
-            navigator as any
-          ).serial.requestPort();
-
-        await port.open({
-          baudRate: 115200
-        });
-
-        this.serialPort =
-          port;
-
-        if (
-          !port.writable
-        ) {
-          throw new Error(
-            'Selected serial port has no writable stream.'
-          );
-        }
-
-        this.writer =
-          port.writable.getWriter();
-
-        void this.startSerialReadLoop();
-
-        this.rawState =
-          'CONNECTED';
-
-        this.setStatus(
-          'CONNECTED'
-        );
-
-        return true;
-      }
-
-      // ---------------------------------------------------------
-      // NATIVE ANDROID BLUETOOTH SPP
-      // ---------------------------------------------------------
-
-      const targetMac =
-        (
-          this.config
-            .bluetoothMacAddress ||
-          ''
-        )
-          .trim()
-          .toUpperCase();
-
-      if (!targetMac) {
-        throw new Error(
-          'No Bluetooth MAC address specified. Scan and select a real paired SPP device.'
-        );
-      }
-
-      console.log(
-        `[BT-CONNECT] START address=${targetMac}`
-      );
-
-      await BluetoothSpp.connect({
-        address: targetMac
-      });
-
-      console.log(
-        '[BT-CONNECT] SPP CONNECTED'
-      );
-
-      await this.startNativeBtReadLoop();
-
-      this.rawState =
-        'CONNECTED';
-
-      this.setStatus(
-        'CONNECTED'
-      );
-
-      return true;
-
-    } catch (err: any) {
-
-      const errMsg =
-        typeof err === 'string'
-          ? err
-          : (
-              err?.message ||
-              'Bluetooth connection failed'
-            );
-
-      const errObj =
-        err instanceof Error
-          ? err
-          : new Error(errMsg);
-
-      this.lastError =
-        errObj;
-
-      this.lastErrorStackTrace =
-        errObj.stack || null;
-
-      this.rawState =
-        'ERROR';
-
-      this.setStatus(
-        'ERROR',
-        errMsg
-      );
-
-      console.error(
-        `[BT-CONNECT] FAILED: ${errMsg}`,
-        err
-      );
-
-      await this.cleanupConnectionResources(
-        true
-      );
-
-      return false;
-
-    } finally {
-
-      this.isConnecting =
-        false;
+  uint8_t rawRx[128];
+  size_t rawRxLen = 0;
+  unsigned long startT = millis();
+  while ((millis() - startT) < timeoutMs && rawRxLen < 128) {
+    if (Serial2.available()) {
+      rawRx[rawRxLen++] = Serial2.read();
+      startT = millis();
+    } else {
+      delay(1);
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // SCAN
-  // ---------------------------------------------------------------------------
-
-  public async scanDevices(
-    onDeviceDiscovered?:
-      (
-        dev: BluetoothDeviceInfo
-      ) => void
-  ): Promise<
-    BluetoothDeviceInfo[]
-  > {
-
-    if (this.isScanning) {
-      console.warn(
-        '[BT-SCAN] Scan already running'
-      );
-
-      return [];
-    }
-
-    this.isScanning = true;
-
-    const devicesMap =
-      new Map<
-        string,
-        BluetoothDeviceInfo
-      >();
-
-    console.log(
-      '[BT-SCAN] START'
-    );
-
-    try {
-
-      // ---------------------------------------------------------
-      // SAVED DEVICES
-      // ---------------------------------------------------------
-
-      try {
-
-        if (
-          typeof localStorage !==
-          'undefined'
-        ) {
-
-          const savedRaw =
-            localStorage.getItem(
-              'hamza_obd_custom_bt_devices'
-            );
-
-          if (savedRaw) {
-
-            const savedList:
-              BluetoothDeviceInfo[] =
-              JSON.parse(
-                savedRaw
-              );
-
-            for (
-              const device of savedList
-            ) {
-
-              const address =
-                (
-                  device.address ||
-                  ''
-                )
-                  .trim()
-                  .toUpperCase();
-
-              if (!address) {
-                continue;
-              }
-
-              devicesMap.set(
-                address,
-                {
-                  ...device,
-                  address
-                }
-              );
-            }
-          }
-        }
-
-      } catch (error) {
-
-        console.warn(
-          '[BT-SCAN] Failed loading saved devices',
-          error
-        );
-      }
-
-      const isNative =
-        Capacitor.isNativePlatform();
-
-      // ---------------------------------------------------------
-      // NON-NATIVE
-      // ---------------------------------------------------------
-
-      if (!isNative) {
-
-        console.log(
-          '[BT-SCAN] Non-native scan finished'
-        );
-
-        return Array.from(
-          devicesMap.values()
-        );
-      }
-
-      // ---------------------------------------------------------
-      // PAIRED DEVICES
-      // ---------------------------------------------------------
-
-      try {
-
-        const pairedResult =
-          await BluetoothSpp
-            .getPairedDevices();
-
-        const rawPaired =
-          pairedResult?.devices || [];
-
-        for (
-          const device of rawPaired
-        ) {
-
-          const address =
-            (
-              device.address ||
-              ''
-            )
-              .trim()
-              .toUpperCase();
-
-          if (!address) {
-            continue;
-          }
-
-          const devInfo:
-            BluetoothDeviceInfo = {
-
-            name:
-              device.name ||
-              'Paired Bluetooth Device',
-
-            address,
-
-            bonded: true,
-
-            type:
-              'CLASSIC_SPP'
-          };
-
-          devicesMap.set(
-            address,
-            devInfo
-          );
-
-          onDeviceDiscovered?.(
-            devInfo
-          );
-        }
-
-      } catch (error) {
-
-        console.warn(
-          '[BT-SCAN] getPairedDevices failed',
-          error
-        );
-      }
-
-      // ---------------------------------------------------------
-      // LIVE DISCOVERY
-      // ---------------------------------------------------------
-
-      let foundHandle:
-        any = null;
-
-      let finishHandle:
-        any = null;
-
-      let discoveryFinishedResolve:
-        (() => void) | null = null;
-
-      const discoveryFinishedPromise =
-        new Promise<void>(
-          resolve => {
-            discoveryFinishedResolve =
-              resolve;
-          }
-        );
-
-      try {
-
-        foundHandle =
-          await (
-            BluetoothSpp as any
-          ).addListener(
-            'onBluetoothDeviceFound',
-            (device: any) => {
-
-              const address =
-                (
-                  device?.address ||
-                  ''
-                )
-                  .trim()
-                  .toUpperCase();
-
-              if (!address) {
-                return;
-              }
-
-              const detectedType =
-                device?.type;
-
-              /**
-               * Do not pretend BLE is SPP.
-               *
-               * Only Classic Bluetooth devices should be
-               * presented as SPP-capable.
-               */
-              const type =
-                detectedType === 'BLE'
-                  ? 'BLE'
-                  : 'CLASSIC_SPP';
-
-              const devInfo:
-                BluetoothDeviceInfo = {
-
-                name:
-                  device?.name ||
-                  'Unknown Bluetooth Device',
-
-                address,
-
-                bonded:
-                  Boolean(
-                    device?.bonded
-                  ),
-
-                rssi:
-                  typeof device?.rssi ===
-                  'number'
-                    ? device.rssi
-                    : undefined,
-
-                type
-              };
-
-              devicesMap.set(
-                address,
-                devInfo
-              );
-
-              onDeviceDiscovered?.(
-                devInfo
-              );
-            }
-          );
-
-        finishHandle =
-          await (
-            BluetoothSpp as any
-          ).addListener(
-            'onBluetoothDiscoveryFinished',
-            () => {
-              discoveryFinishedResolve?.();
-            }
-          );
-
-        await BluetoothSpp
-          .startDiscovery();
-
-        await Promise.race([
-          discoveryFinishedPromise,
-
-          new Promise<void>(
-            resolve =>
-              setTimeout(
-                resolve,
-                12000
-              )
-          )
-        ]);
-
-      } finally {
-
-        try {
-          await BluetoothSpp
-            .stopDiscovery();
-        } catch {}
-
-        try {
-          await foundHandle?.remove();
-        } catch {}
-
-        try {
-          await finishHandle?.remove();
-        } catch {}
-      }
-
-      return Array.from(
-        devicesMap.values()
-      );
-
-    } finally {
-
-      this.isScanning =
-        false;
-
-      console.log(
-        '[BT-SCAN] FINISHED'
-      );
-    }
+  uint8_t cleanRx[128];
+  size_t cleanRxLen = stripTxEcho(frameTx, frameTxLen, rawRx, rawRxLen, cleanRx);
+
+  if (cleanRxLen == 0) {
+    klineState.rxErrorCount++;
+    klineState.lastErrorCode = KLINE_STATUS_ECU_NO_RESPONSE;
+    return KLINE_STATUS_ECU_NO_RESPONSE;
   }
 
-  // ---------------------------------------------------------------------------
-  // DISCONNECT
-  // ---------------------------------------------------------------------------
+  uint8_t rxCs = 0;
+  for (size_t i = 0; i < cleanRxLen - 1; i++) rxCs += cleanRx[i];
 
-  public async disconnect():
-    Promise<void> {
-
-    this.isConnecting =
-      false;
-
-    await this.cleanupConnectionResources(
-      true
-    );
-
-    this.rxBuffer =
-      new Uint8Array(0);
-
-    this.asciiRxBuffer =
-      '';
-
-    this.rawState =
-      'DISCONNECTED';
-
-    this.setStatus(
-      'DISCONNECTED'
-    );
+  if (rxCs != cleanRx[cleanRxLen - 1]) {
+    klineState.rxErrorCount++;
+    klineState.lastErrorCode = KLINE_STATUS_CHECKSUM_ERROR;
+    return KLINE_STATUS_CHECKSUM_ERROR;
   }
 
-  /**
-   * Clean resources.
-   *
-   * disconnectNative:
-   * - true  = explicitly disconnect the native device.
-   * - false = native device already disconnected; do not call
-   *           BluetoothSpp.disconnect() again.
-   */
-  private async cleanupConnectionResources(
-    disconnectNative = true
-  ): Promise<void> {
-
-    // ---------------------------------------------------------
-    // Native listeners
-    // ---------------------------------------------------------
-
-    try {
-      await this.nativeDataListener?.remove();
-    } catch {}
-
-    try {
-      await this.nativeDisconnectListener?.remove();
-    } catch {}
-
-    this.nativeDataListener =
-      null;
-
-    this.nativeDisconnectListener =
-      null;
-
-    // ---------------------------------------------------------
-    // Web Serial
-    // ---------------------------------------------------------
-
-    if (this.reader) {
-
-      try {
-        await this.reader.cancel();
-      } catch {}
-
-      try {
-        this.reader.releaseLock();
-      } catch {}
-
-      this.reader = null;
-    }
-
-    if (this.writer) {
-
-      try {
-        this.writer.releaseLock();
-      } catch {}
-
-      this.writer = null;
-    }
-
-    if (this.serialPort) {
-
-      try {
-        await this.serialPort.close();
-      } catch {}
-
-      this.serialPort = null;
-    }
-
-    // ---------------------------------------------------------
-    // Native Bluetooth
-    // ---------------------------------------------------------
-
-    if (
-      disconnectNative &&
-      Capacitor.isNativePlatform()
-    ) {
-
-      try {
-        await BluetoothSpp
-          .disconnect();
-      } catch {}
-    }
-
-    /**
-     * IMPORTANT:
-     *
-     * Resolve all pending requests before clearing their
-     * resolver references. Otherwise promises can remain pending
-     * forever after a Bluetooth disconnect.
-     */
-    this.clearPendingResolvers();
-
-    /**
-     * Reset the write chain.
-     */
-    this.writeQueue =
-      Promise.resolve();
-  }
-
-  private clearPendingResolvers():
-    void {
-
-    // ---------------------------------------------------------
-    // PING
-    // ---------------------------------------------------------
-
-    if (
-      this.pingTimeoutHandle
-    ) {
-      clearTimeout(
-        this.pingTimeoutHandle
-      );
-    }
-
-    const pingResolver =
-      this.pingResolver;
-
-    const pingStart =
-      this.pingStartTime;
-
-    this.pingTimeoutHandle =
-      null;
-
-    this.pingResolver =
-      null;
-
-    this.pingStartTime =
-      null;
-
-    if (pingResolver) {
-
-      const latencyMs =
-        pingStart !== null
-          ? Math.max(
-              0,
-              Math.round(
-                performance.now() -
-                pingStart
-              )
-            )
-          : 0;
-
-      pingResolver({
-        success: false,
-        latencyMs,
-        info:
-          'Bluetooth disconnected'
-      });
-    }
-
-    // ---------------------------------------------------------
-    // CAN STATUS
-    // ---------------------------------------------------------
-
-    if (
-      this.canStatusTimeoutHandle
-    ) {
-      clearTimeout(
-        this.canStatusTimeoutHandle
-      );
-    }
-
-    const canStatusResolver =
-      this.canStatusResolver;
-
-    this.canStatusTimeoutHandle =
-      null;
-
-    this.canStatusResolver =
-      null;
-
-    if (canStatusResolver) {
-      canStatusResolver(null);
-    }
-
-    // ---------------------------------------------------------
-    // K-LINE INIT
-    // ---------------------------------------------------------
-
-    if (
-      this.klineInitTimeoutHandle
-    ) {
-      clearTimeout(
-        this.klineInitTimeoutHandle
-      );
-    }
-
-    const klineInitResolver =
-      this.klineInitResolver;
-
-    this.klineInitTimeoutHandle =
-      null;
-
-    this.klineInitResolver =
-      null;
-
-    if (klineInitResolver) {
-
-      klineInitResolver({
-        success: false,
-        activeProtocol: 0,
-        keyByte1: 0,
-        keyByte2: 0
-      });
-    }
-
-    // ---------------------------------------------------------
-    // K-LINE STATUS
-    // ---------------------------------------------------------
-
-    if (
-      this.klineStatusTimeoutHandle
-    ) {
-      clearTimeout(
-        this.klineStatusTimeoutHandle
-      );
-    }
-
-    const klineStatusResolver =
-      this.klineStatusResolver;
-
-    this.klineStatusTimeoutHandle =
-      null;
-
-    this.klineStatusResolver =
-      null;
-
-    if (klineStatusResolver) {
-      klineStatusResolver(null);
-    }
-
-    // ---------------------------------------------------------
-    // K-LINE FRAME
-    // ---------------------------------------------------------
-
-    if (
-      this.klineFrameTimeoutHandle
-    ) {
-      clearTimeout(
-        this.klineFrameTimeoutHandle
-      );
-    }
-
-    const klineFrameResolver =
-      this.klineFrameResolver;
-
-    this.klineFrameTimeoutHandle =
-      null;
-
-    this.klineFrameResolver =
-      null;
-
-    if (klineFrameResolver) {
-
-      klineFrameResolver({
-        status: 0x04,
-        data: []
-      });
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // RAW SEND
-  // ---------------------------------------------------------------------------
-
-  public async sendRaw(
-    data:
-      Uint8Array | number[]
-  ): Promise<boolean> {
-
-    if (
-      !this.isConnected() &&
-      !this.config.isMockMode
-    ) {
-      return false;
-    }
-
-    /**
-     * Always clone the data.
-     *
-     * The actual write may happen later because of writeQueue.
-     */
-    const byteArr =
-      new Uint8Array(
-        data instanceof Uint8Array
-          ? data
-          : data
-      );
-
-    if (
-      byteArr.length === 0
-    ) {
-      return false;
-    }
-
-    // ---------------------------------------------------------
-    // MOCK
-    // ---------------------------------------------------------
-
-    if (
-      this.config.isMockMode
-    ) {
-      return true;
-    }
-
-    const hex =
-      this.debugRawTraffic
-        ? Array.from(byteArr)
-            .map(
-              b =>
-                b.toString(16)
-                  .padStart(2, '0')
-                  .toUpperCase()
-            )
-            .join(' ')
-        : '';
-
-    /**
-     * The queued operation itself re-checks the connection.
-     * This prevents an old queued write from being sent after
-     * disconnect/reconnect.
-     */
-    const operation =
-      this.writeQueue.then(
-        async () => {
-
-          if (
-            !this.isConnected()
-          ) {
-            throw new Error(
-              'Transport disconnected before write'
-            );
-          }
-
-          // -----------------------------------------------------
-          // NATIVE
-          // -----------------------------------------------------
-
-          if (
-            Capacitor.isNativePlatform()
-          ) {
-
-            if (
-              this.debugRawTraffic
-            ) {
-              console.log(
-                `[BT-TX] ${hex}`
-              );
-            }
-
-            await BluetoothSpp.write({
-              data:
-                Array.from(
-                  byteArr
-                )
-            });
-
-            return;
-          }
-
-          // -----------------------------------------------------
-          // WEB SERIAL
-          // -----------------------------------------------------
-
-          if (this.writer) {
-
-            if (
-              this.debugRawTraffic
-            ) {
-              console.log(
-                `[SERIAL-TX] ${hex}`
-              );
-            }
-
-            await this.writer.write(
-              byteArr
-            );
-
-            return;
-          }
-
-          throw new Error(
-            'No active Bluetooth/Serial writer'
-          );
-        }
-      );
-
-    /**
-     * Never allow a rejected operation to poison the queue.
-     */
-    this.writeQueue =
-      operation.then(
-        () => undefined,
-        () => undefined
-      );
-
-    try {
-
-      await operation;
-
-      return true;
-
-    } catch (error) {
-
-      console.error(
-        '[BT-TX] Write Error',
-        error
-      );
-
-      return false;
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // CAN
-  // ---------------------------------------------------------------------------
-
-  public async sendCanFrame(
-    canId: number,
-    data: number[],
-    isExtended = false
-  ): Promise<boolean> {
-
-    // ---------------------------------------------------------
-    // MOCK
-    // ---------------------------------------------------------
-
-    if (
-      this.config.isMockMode
-    ) {
-      return true;
-    }
-
-    // ---------------------------------------------------------
-    // CONNECTION
-    // ---------------------------------------------------------
-
-    if (
-      !this.isConnected()
-    ) {
-      return false;
-    }
-
-    // ---------------------------------------------------------
-    // CAN ID
-    // ---------------------------------------------------------
-
-    if (
-      !Number.isInteger(canId) ||
-      canId < 0 ||
-      (
-        !isExtended &&
-        canId > 0x7FF
-      ) ||
-      (
-        isExtended &&
-        canId > 0x1FFFFFFF
-      )
-    ) {
-
-      console.error(
-        `[BT-CAN-TX] Invalid CAN ID: 0x${canId.toString(16)}`
-      );
-
-      return false;
-    }
-
-    // ---------------------------------------------------------
-    // DLC
-    // ---------------------------------------------------------
-
-    if (
-      !Array.isArray(data) ||
-      data.length > 8
-    ) {
-
-      console.error(
-        '[BT-CAN-TX] CAN data exceeds 8 bytes'
-      );
-
-      return false;
-    }
-
-    // ---------------------------------------------------------
-    // DATA
-    // ---------------------------------------------------------
-
-    const cleanData =
-      data.map(
-        byte => {
-
-          if (
-            !Number.isInteger(byte) ||
-            byte < 0 ||
-            byte > 0xFF
-          ) {
-            throw new Error(
-              `Invalid CAN data byte: ${byte}`
-            );
-          }
-
-          return byte;
-        }
-      );
-
-    try {
-
-      const packet =
-        BinaryProtocol.encodeCanFrame(
-          canId,
-          cleanData,
-          isExtended
-        );
-
-      return this.sendRaw(
-        packet
-      );
-
-    } catch (error) {
-
-      console.error(
-        '[BT-CAN-TX] Encode error',
-        error
-      );
-
-      return false;
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // PING
-  // ---------------------------------------------------------------------------
-
-  public async ping():
-    Promise<PingResult> {
-
-    const startTime =
-      performance.now();
-
-    const pingPacket =
-      BinaryProtocol.encodePing();
-
-    const txHex =
-      Array.from(pingPacket)
-        .map(
-          b =>
-            b.toString(16)
-              .padStart(2, '0')
-              .toUpperCase()
-        )
-        .join(' ');
-
-    // ---------------------------------------------------------
-    // MOCK
-    // ---------------------------------------------------------
-
-    if (
-      this.config.isMockMode
-    ) {
-
-      await new Promise(
-        resolve =>
-          setTimeout(
-            resolve,
-            22
-          )
-      );
-
-      return {
-        success: true,
-        latencyMs:
-          Math.round(
-            performance.now() -
-            startTime
-          ),
-        canReady: true,
-        txHex
-      };
-    }
-
-    // ---------------------------------------------------------
-    // CONNECTION
-    // ---------------------------------------------------------
-
-    if (
-      !this.isConnected()
-    ) {
-
-      return {
-        success: false,
-        latencyMs: 0,
-        info:
-          'Bluetooth SPP not connected',
-        txHex
-      };
-    }
-
-    // ---------------------------------------------------------
-    // DUPLICATE REQUEST
-    // ---------------------------------------------------------
-
-    if (
-      this.pingResolver
-    ) {
-
-      return {
-        success: false,
-        latencyMs: 0,
-        info:
-          'Another Bluetooth ping is already pending',
-        txHex
-      };
-    }
-
-    return new Promise(
-      resolve => {
-
-        this.pingStartTime =
-          startTime;
-
-        this.pingTimeoutHandle =
-          setTimeout(
-            () => {
-
-              this.pingResolver =
-                null;
-
-              this.pingStartTime =
-                null;
-
-              this.pingTimeoutHandle =
-                null;
-
-              resolve({
-                success: false,
-                latencyMs:
-                  Math.round(
-                    performance.now() -
-                    startTime
-                  ),
-                info:
-                  'Bluetooth Ping Timeout',
-                txHex
-              });
-
-            },
-            2000
-          );
-
-        this.pingResolver =
-          result => {
-
-            if (
-              this.pingTimeoutHandle
-            ) {
-              clearTimeout(
-                this.pingTimeoutHandle
-              );
-            }
-
-            this.pingTimeoutHandle =
-              null;
-
-            this.pingResolver =
-              null;
-
-            this.pingStartTime =
-              null;
-
-            result.txHex =
-              result.txHex || txHex;
-
-            resolve(result);
-          };
-
-        void this.sendRaw(
-          pingPacket
-        ).then(
-          success => {
-
-            if (
-              success
-            ) {
-              return;
-            }
-
-            const resolver =
-              this.pingResolver;
-
-            this.pingResolver =
-              null;
-
-            if (
-              this.pingTimeoutHandle
-            ) {
-              clearTimeout(
-                this.pingTimeoutHandle
-              );
-            }
-
-            this.pingTimeoutHandle =
-              null;
-
-            this.pingStartTime =
-              null;
-
-            if (resolver) {
-              resolver({
-                success: false,
-                latencyMs:
-                  Math.round(
-                    performance.now() -
-                    startTime
-                  ),
-                info:
-                  'Bluetooth Ping Write Failed',
-                txHex
-              });
-            }
-          }
-        );
-      }
-    );
-  }
-
-  // ---------------------------------------------------------------------------
-  // CAN STATUS
-  // ---------------------------------------------------------------------------
-
-  public async getCanStatus():
-    Promise<CanBusStatus | null> {
-
-    // ---------------------------------------------------------
-    // MOCK
-    // ---------------------------------------------------------
-
-    if (
-      this.config.isMockMode
-    ) {
-
-      return {
-        state: 'READY',
-        speed: 500000,
-        mode: '11-BIT',
-        txErrorCount: 0,
-        rxErrorCount: 0,
-        busOverrunCount: 0,
-        queueSize: 0,
-        messagesSent: 0,
-        messagesReceived: 0
-      };
-    }
-
-    // ---------------------------------------------------------
-    // CONNECTION
-    // ---------------------------------------------------------
-
-    if (
-      !this.isConnected()
-    ) {
-      return null;
-    }
-
-    if (
-      this.canStatusResolver
-    ) {
-
-      console.warn(
-        '[BT-CAN-STATUS] Request already pending'
-      );
-
-      return null;
-    }
-
-    return new Promise(
-      resolve => {
-
-        this.canStatusTimeoutHandle =
-          setTimeout(
-            () => {
-
-              this.canStatusResolver =
-                null;
-
-              this.canStatusTimeoutHandle =
-                null;
-
-              resolve(null);
-
-            },
-            2000
-          );
-
-        this.canStatusResolver =
-          status => {
-
-            if (
-              this.canStatusTimeoutHandle
-            ) {
-              clearTimeout(
-                this.canStatusTimeoutHandle
-              );
-            }
-
-            this.canStatusTimeoutHandle =
-              null;
-
-            this.canStatusResolver =
-              null;
-
-            resolve(status);
-          };
-
-        void this.sendRaw(
-          BinaryProtocol
-            .encodeCanStatusReq()
-        ).then(
-          success => {
-
-            if (
-              success
-            ) {
-              return;
-            }
-
-            const resolver =
-              this.canStatusResolver;
-
-            this.canStatusResolver =
-              null;
-
-            if (
-              this.canStatusTimeoutHandle
-            ) {
-              clearTimeout(
-                this.canStatusTimeoutHandle
-              );
-            }
-
-            this.canStatusTimeoutHandle =
-              null;
-
-            resolver?.(null);
-          }
-        );
-      }
-    );
-  }
-
-  // ---------------------------------------------------------------------------
-  // RX
-  // ---------------------------------------------------------------------------
-
-  private handleIncomingData(
-    data:
-      ArrayBuffer |
-      Uint8Array |
-      string |
-      number[]
-  ): void {
-
-    const newBytes =
-      this.normalizeIncomingBytes(
-        data
-      );
-
-    if (
-      newBytes.length === 0
-    ) {
-      return;
-    }
-
-    if (
-      this.debugRawTraffic
-    ) {
-
-      const rxHex =
-        Array.from(newBytes)
-          .map(
-            b =>
-              b.toString(16)
-                .padStart(2, '0')
-                .toUpperCase()
-          )
-          .join(' ');
-
-      console.log(
-        `[BT-RX-RAW] ${rxHex}`
-      );
-    }
-
-    // ---------------------------------------------------------
-    // RAW LISTENERS
-    // ---------------------------------------------------------
-
-    for (
-      const listener of [
-        ...this.dataListeners
-      ]
-    ) {
-      try {
-        listener(
-          new Uint8Array(
-            newBytes
-          )
-        );
-      } catch (error) {
-        console.error(
-          '[BT-RX-DATA-LISTENER]',
-          error
-        );
-      }
-    }
-
-    // ---------------------------------------------------------
-    // BINARY STREAM
-    // ---------------------------------------------------------
-
-    const merged =
-      new Uint8Array(
-        this.rxBuffer.length +
-        newBytes.length
-      );
-
-    merged.set(
-      this.rxBuffer,
-      0
-    );
-
-    merged.set(
-      newBytes,
-      this.rxBuffer.length
-    );
-
-    this.rxBuffer =
-      merged;
-
-    const parsed =
-      BinaryProtocol.parseStream(
-        this.rxBuffer
-      );
-
-    this.rxBuffer =
-      parsed.remainingBuffer;
-
-    // ---------------------------------------------------------
-    // DECODED PACKETS
-    // ---------------------------------------------------------
-
-    for (
-      const packet of parsed.packets
-    ) {
-
-      if (
-        (packet as any).isValid === false
-      ) {
-        console.warn(
-          '[BT-RX] Ignoring invalid binary packet'
-        );
-
-        continue;
-      }
-
-      if (
-        this.debugRawTraffic
-      ) {
-
-        const pktHex =
-          Array.from(
-            packet.rawFrame
-          )
-            .map(
-              b =>
-                b.toString(16)
-                  .padStart(2, '0')
-                  .toUpperCase()
-            )
-            .join(' ');
-
-        console.log(
-          `[BT-RX-FRAME] CMD=0x${packet.cmd
-            .toString(16)
-            .padStart(2, '0')
-            .toUpperCase()} ` +
-          `LEN=${packet.payload.length} ` +
-          `HEX=[${pktHex}]`
-        );
-      }
-
-      this.processDecodedPacket(
-        packet
-      );
-    }
-
-    /**
-     * IMPORTANT:
-     *
-     * Do NOT automatically call the ASCII parser here.
-     *
-     * Binary payloads can legitimately contain:
-     * 0x0D
-     * 0x0A
-     * ASCII-looking bytes
-     *
-     * Feeding them to an ELM parser would corrupt rxBuffer.
-     */
-  }
-
-  // ---------------------------------------------------------------------------
-  // NORMALIZE NATIVE DATA
-  // ---------------------------------------------------------------------------
-
-  private normalizeIncomingBytes(
-    data:
-      ArrayBuffer |
-      Uint8Array |
-      string |
-      number[] |
-      ArrayBufferView
-  ): Uint8Array {
-
-    if (
-      data instanceof Uint8Array
-    ) {
-      return new Uint8Array(
-        data
-      );
-    }
-
-    if (
-      data instanceof ArrayBuffer
-    ) {
-      return new Uint8Array(
-        data
-      );
-    }
-
-    if (
-      Array.isArray(data)
-    ) {
-      return new Uint8Array(
-        data.map(
-          byte =>
-            Number(byte) & 0xFF
-        )
-      );
-    }
-
-    if (
-      typeof ArrayBuffer !==
-      'undefined' &&
-      ArrayBuffer.isView(data)
-    ) {
-
-      const view =
-        data as ArrayBufferView;
-
-      return new Uint8Array(
-        view.buffer,
-        view.byteOffset,
-        view.byteLength
-      );
-    }
-
-    if (
-      typeof data === 'string'
-    ) {
-
-      /**
-       * IMPORTANT:
-       *
-       * We do not assume that a string is hexadecimal or Base64.
-       * The actual plugin contract must determine that.
-       *
-       * For now it is treated as raw byte characters, preserving
-       * the behavior of the previous implementation.
-       */
-      const bytes =
-        new Uint8Array(
-          data.length
-        );
-
-      for (
-        let i = 0;
-        i < data.length;
-        i++
-      ) {
-
-        bytes[i] =
-          data.charCodeAt(i) &
-          0xFF;
-      }
-
-      return bytes;
-    }
-
-    return new Uint8Array(0);
-  }
-
-  // ---------------------------------------------------------------------------
-  // OPTIONAL LEGACY ASCII API
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Legacy ELM-compatible parser.
-   *
-   * This function is intentionally NOT connected to the binary
-   * RX stream.
-   *
-   * It must only be called by a transport that has explicitly
-   * established that its source is ASCII ELM data.
-   */
-  private checkAndParseAsciiLines(
-    text?: string
-  ): void {
-
-    if (
-      typeof text === 'string'
-    ) {
-      this.asciiRxBuffer +=
-        text;
-    }
-
-    if (
-      !this.asciiRxBuffer
-    ) {
-      return;
-    }
-
-    const hasTerminator =
-      this.asciiRxBuffer.includes('\r') ||
-      this.asciiRxBuffer.includes('\n') ||
-      this.asciiRxBuffer.includes('>');
-
-    if (!hasTerminator) {
-      return;
-    }
-
-    const lines =
-      this.asciiRxBuffer
-        .split(/[\r\n>]+/);
-
-    const terminated =
-      this.asciiRxBuffer.endsWith('\r') ||
-      this.asciiRxBuffer.endsWith('\n') ||
-      this.asciiRxBuffer.endsWith('>');
-
-    const limit =
-      terminated
-        ? lines.length
-        : lines.length - 1;
-
-    for (
-      let i = 0;
-      i < limit;
-      i++
-    ) {
-
-      const line =
-        lines[i].trim();
-
-      if (!line) {
-        continue;
-      }
-
-      const cleanHex =
-        line.replace(
-          /[^0-9A-Fa-f]/g,
-          ''
-        );
-
-      if (
-        cleanHex.length < 4 ||
-        cleanHex.length % 2 !== 0
-      ) {
-        continue;
-      }
-
-      const bytes: number[] =
-        [];
-
-      for (
-        let k = 0;
-        k < cleanHex.length;
-        k += 2
-      ) {
-
-        bytes.push(
-          parseInt(
-            cleanHex.substring(
-              k,
-              k + 2
-            ),
-            16
-          )
-        );
-      }
-
-      const modeByte =
-        bytes[0];
-
-      const validElmResponse =
-        modeByte === 0x41 ||
-        modeByte === 0x43 ||
-        modeByte === 0x47 ||
-        modeByte === 0x4A ||
-        modeByte === 0x44 ||
-        modeByte === 0x59 ||
-        modeByte === 0x7F;
-
-      if (
-        !validElmResponse
-      ) {
-        continue;
-      }
-
-      const frame:
-        CanFrame = {
-
-        id: '0x7E8',
-
-        dlc:
-          Math.min(
-            bytes.length,
-            8
-          ),
-
-        dataHex:
-          bytes
-            .slice(0, 8)
-            .map(
-              b =>
-                b.toString(16)
-                  .padStart(2, '0')
-                  .toUpperCase()
-            )
-            .join(' '),
-
-        dataBytes:
-          bytes.slice(0, 8),
-
-        direction: 'Rx',
-
-        isExtended: false
-      };
-
-      canManager.addFrame(
-        frame
-      );
-
-      for (
-        const listener of [
-          ...this.canFrameListeners
-        ]
-      ) {
-        try {
-          listener(frame);
-        } catch (error) {
-          console.error(
-            '[BT-CAN-LISTENER]',
-            error
-          );
-        }
-      }
-    }
-
-    if (terminated) {
-      this.asciiRxBuffer = '';
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // K-LINE
-  // ---------------------------------------------------------------------------
-
-  public onKlinePacket(
-    callback:
-      (
-        pkt: DecodedBinaryPacket
-      ) => void
-  ): () => void {
-
-    this.klinePacketListeners.push(
-      callback
-    );
-
-    return () => {
-      this.klinePacketListeners =
-        this.klinePacketListeners.filter(
-          listener =>
-            listener !== callback
-        );
-    };
-  }
-
-  public async sendKlineInit(
-    protocolId?: number
-  ): Promise<{
-    success: boolean;
-    activeProtocol: number;
-    keyByte1: number;
-    keyByte2: number;
-  }> {
-
-    // ---------------------------------------------------------
-    // MOCK
-    // ---------------------------------------------------------
-
-    if (
-      this.config.isMockMode
-    ) {
-
-      return {
-        success: true,
-        activeProtocol:
-          protocolId ?? 0x06,
-        keyByte1: 0x8F,
-        keyByte2: 0xEA
-      };
-    }
-
-    // ---------------------------------------------------------
-    // CONNECTION
-    // ---------------------------------------------------------
-
-    if (
-      !this.isConnected()
-    ) {
-
-      return {
-        success: false,
-        activeProtocol: 0,
-        keyByte1: 0,
-        keyByte2: 0
-      };
-    }
-
-    if (
-      this.klineInitResolver
-    ) {
-
-      return {
-        success: false,
-        activeProtocol: 0,
-        keyByte1: 0,
-        keyByte2: 0
-      };
-    }
-
-    return new Promise(
-      resolve => {
-
-        this.klineInitTimeoutHandle =
-          setTimeout(
-            () => {
-
-              this.klineInitResolver =
-                null;
-
-              this.klineInitTimeoutHandle =
-                null;
-
-              resolve({
-                success: false,
-                activeProtocol: 0,
-                keyByte1: 0,
-                keyByte2: 0
-              });
-
-            },
-            3000
-          );
-
-        this.klineInitResolver =
-          result => {
-
-            if (
-              this.klineInitTimeoutHandle
-            ) {
-              clearTimeout(
-                this.klineInitTimeoutHandle
-              );
-            }
-
-            this.klineInitTimeoutHandle =
-              null;
-
-            this.klineInitResolver =
-              null;
-
-            resolve(result);
-          };
-
-        void this.sendRaw(
-          BinaryProtocol.encodeKlineInit(
-            protocolId
-          )
-        ).then(
-          success => {
-
-            if (
-              success
-            ) {
-              return;
-            }
-
-            const resolver =
-              this.klineInitResolver;
-
-            this.klineInitResolver =
-              null;
-
-            if (
-              this.klineInitTimeoutHandle
-            ) {
-              clearTimeout(
-                this.klineInitTimeoutHandle
-              );
-            }
-
-            this.klineInitTimeoutHandle =
-              null;
-
-            resolver?.({
-              success: false,
-              activeProtocol: 0,
-              keyByte1: 0,
-              keyByte2: 0
-            });
-          }
-        );
-      }
-    );
-  }
-
-  public async sendKlineFrame(
-    payload: number[]
-  ): Promise<{
-    status: number;
-    data: number[];
-  }> {
-
-    // ---------------------------------------------------------
-    // MOCK
-    // ---------------------------------------------------------
-
-    if (
-      this.config.isMockMode
-    ) {
-
-      if (
-        payload[0] === 0x01 &&
-        payload[1] === 0x00
-      ) {
-
-        return {
-          status: 0,
-          data: [
-            0x41,
-            0x00,
-            0xBE,
-            0x3E,
-            0x28,
-            0x10
-          ]
-        };
-      }
-
-      return {
-        status: 0,
-        data: [
-          ((payload[0] ?? 0) +
-            0x40) & 0xFF,
-          payload[1] ?? 0x00,
-          0x00,
-          0x00
-        ]
-      };
-    }
-
-    // ---------------------------------------------------------
-    // CONNECTION
-    // ---------------------------------------------------------
-
-    if (
-      !this.isConnected()
-    ) {
-
-      return {
-        status: 0x04,
-        data: []
-      };
-    }
-
-    if (
-      this.klineFrameResolver
-    ) {
-
-      return {
-        status: 0x04,
-        data: []
-      };
-    }
-
-    return new Promise(
-      resolve => {
-
-        this.klineFrameTimeoutHandle =
-          setTimeout(
-            () => {
-
-              this.klineFrameResolver =
-                null;
-
-              this.klineFrameTimeoutHandle =
-                null;
-
-              resolve({
-                status: 0x04,
-                data: []
-              });
-
-            },
-            2500
-          );
-
-        this.klineFrameResolver =
-          result => {
-
-            if (
-              this.klineFrameTimeoutHandle
-            ) {
-              clearTimeout(
-                this.klineFrameTimeoutHandle
-              );
-            }
-
-            this.klineFrameTimeoutHandle =
-              null;
-
-            this.klineFrameResolver =
-              null;
-
-            resolve(result);
-          };
-
-        let packet:
-          Uint8Array;
-
-        try {
-
-          packet =
-            BinaryProtocol
-              .encodeKlineFrame(
-                payload
-              );
-
-        } catch (error) {
-
-          const resolver =
-            this.klineFrameResolver;
-
-          this.klineFrameResolver =
-            null;
-
-          if (
-            this.klineFrameTimeoutHandle
-          ) {
-            clearTimeout(
-              this.klineFrameTimeoutHandle
-            );
-          }
-
-          this.klineFrameTimeoutHandle =
-            null;
-
-          resolver?.({
-            status: 0x04,
-            data: []
-          });
-
-          return;
-        }
-
-        void this.sendRaw(
-          packet
-        ).then(
-          success => {
-
-            if (
-              success
-            ) {
-              return;
-            }
-
-            const resolver =
-              this.klineFrameResolver;
-
-            this.klineFrameResolver =
-              null;
-
-            if (
-              this.klineFrameTimeoutHandle
-            ) {
-              clearTimeout(
-                this.klineFrameTimeoutHandle
-              );
-            }
-
-            this.klineFrameTimeoutHandle =
-              null;
-
-            resolver?.({
-              status: 0x04,
-              data: []
-            });
-          }
-        );
-      }
-    );
-  }
-
-  public async getKlineStatus():
-    Promise<any | null> {
-
-    // ---------------------------------------------------------
-    // MOCK
-    // ---------------------------------------------------------
-
-    if (
-      this.config.isMockMode
-    ) {
-
-      return {
-        voltagePresent: true,
-        activeProtocol: 6,
-        initialized: true,
-        rxErrorCount: 0,
-        txErrorCount: 0,
-        lastErrorCode: 0
-      };
-    }
-
-    // ---------------------------------------------------------
-    // CONNECTION
-    // ---------------------------------------------------------
-
-    if (
-      !this.isConnected()
-    ) {
-      return null;
-    }
-
-    if (
-      this.klineStatusResolver
-    ) {
-      return null;
-    }
-
-    return new Promise(
-      resolve => {
-
-        this.klineStatusTimeoutHandle =
-          setTimeout(
-            () => {
-
-              this.klineStatusResolver =
-                null;
-
-              this.klineStatusTimeoutHandle =
-                null;
-
-              resolve(null);
-
-            },
-            2000
-          );
-
-        this.klineStatusResolver =
-          status => {
-
-            if (
-              this.klineStatusTimeoutHandle
-            ) {
-              clearTimeout(
-                this.klineStatusTimeoutHandle
-              );
-            }
-
-            this.klineStatusTimeoutHandle =
-              null;
-
-            this.klineStatusResolver =
-              null;
-
-            resolve(status);
-          };
-
-        void this.sendRaw(
-          BinaryProtocol
-            .encodeKlineStatusReq()
-        ).then(
-          success => {
-
-            if (
-              success
-            ) {
-              return;
-            }
-
-            const resolver =
-              this.klineStatusResolver;
-
-            this.klineStatusResolver =
-              null;
-
-            if (
-              this.klineStatusTimeoutHandle
-            ) {
-              clearTimeout(
-                this.klineStatusTimeoutHandle
-              );
-            }
-
-            this.klineStatusTimeoutHandle =
-              null;
-
-            resolver?.(null);
-          }
-        );
-      }
-    );
-  }
-
-  // ---------------------------------------------------------------------------
-  // DECODED PACKET ROUTER
-  // ---------------------------------------------------------------------------
-
-  private processDecodedPacket(
-    pkt: DecodedBinaryPacket
-  ): void {
-
-    /**
-     * K-Line listeners are allowed to observe decoded packets.
-     *
-     * Existing application behavior is preserved here.
-     */
-    for (
-      const listener of [
-        ...this.klinePacketListeners
-      ]
-    ) {
-
-      try {
-        listener(pkt);
-      } catch (error) {
-        console.error(
-          '[BT-KLINE-PACKET-LISTENER]',
-          error
-        );
-      }
-    }
-
-    // ---------------------------------------------------------
-    // CAN RX
-    // ---------------------------------------------------------
-
-    if (
-      pkt.cmd ===
-        BinaryCommand.CMD_CAN_FRAME &&
-      pkt.canFrame
-    ) {
-
-      const frame =
-        pkt.canFrame;
-
-      /**
-       * No raw console logging here by default.
-       *
-       * CAN traffic can be very high-rate.
-       */
-      if (
-        this.debugRawTraffic
-      ) {
-        console.log(
-          `[CAN-RX] ID=${frame.id} DLC=${frame.dlc} DATA=${frame.dataHex}`
-        );
-      }
-
-      commLogger.logPacket({
-        direction: '[BT RX]',
-        protocol:
-          frame.isExtended
-            ? 'CAN 29-bit'
-            : 'CAN 11-bit',
-        canIdHex:
-          frame.id,
-        responseRaw:
-          frame.dataHex,
-        durationMs: 0,
-        status: 'SUCCESS'
-      });
-
-      canManager.addFrame(
-        frame
-      );
-
-      for (
-        const listener of [
-          ...this.canFrameListeners
-        ]
-      ) {
-
-        try {
-          listener(frame);
-        } catch (error) {
-          console.error(
-            '[BT-CAN-LISTENER]',
-            error
-          );
-        }
-      }
-
-      return;
-    }
-
-    // ---------------------------------------------------------
-    // PONG
-    // ---------------------------------------------------------
-
-    if (
-      pkt.cmd ===
-        BinaryCommand.CMD_PONG &&
-      pkt.pongInfo
-    ) {
-
-      if (
-        this.pingResolver
-      ) {
-
-        const latencyMs =
-          this.pingStartTime !==
-          null
-            ? Math.round(
-                performance.now() -
-                this.pingStartTime
-              )
-            : 0;
-
-        const rxHex =
-          this.debugRawTraffic
-            ? Array.from(
-                pkt.rawFrame
-              )
-                .map(
-                  b =>
-                    b.toString(16)
-                      .padStart(2, '0')
-                      .toUpperCase()
-                )
-                .join(' ')
-            : undefined;
-
-        this.pingResolver({
-          success: true,
-          latencyMs,
-          canReady:
-            pkt.pongInfo.canReady,
-          uptimeMs:
-            pkt.pongInfo.uptimeMs,
-          freeHeapBytes:
-            pkt.pongInfo.freeHeapBytes,
-          info:
-            `ESP32 BT SPP Ready | Uptime ${(pkt.pongInfo.uptimeMs / 1000).toFixed(1)}s`,
-          rxHex
-        });
-      }
-
-      return;
-    }
-
-    // ---------------------------------------------------------
-    // CAN STATUS
-    // ---------------------------------------------------------
-
-    if (
-      pkt.cmd ===
-        BinaryCommand.CMD_CAN_STATUS_RESP &&
-      pkt.canStatus
-    ) {
-
-      this.canStatusResolver?.(
-        pkt.canStatus
-      );
-
-      return;
-    }
-
-    // ---------------------------------------------------------
-    // K-LINE INIT
-    // ---------------------------------------------------------
-
-    if (
-      pkt.cmd ===
-        BinaryCommand.CMD_KLINE_INIT_RESP &&
-      pkt.klineInitResult
-    ) {
-
-      commLogger.logPacket({
-        direction: '[KLINE RX]',
-        protocol:
-          String(
-            pkt.klineInitResp
-              ?.activeProtocol ||
-            'K-LINE'
-          ),
-        decodedData:
-          'KLINE_INIT',
-        responseRaw:
-          `Status=${pkt.klineInitResult.success ? 'SUCCESS' : 'FAILED'} ` +
-          `KB1=0x${pkt.klineInitResult.keyByte1.toString(16).padStart(2, '0').toUpperCase()} ` +
-          `KB2=0x${pkt.klineInitResult.keyByte2.toString(16).padStart(2, '0').toUpperCase()}`,
-        durationMs: 0,
-        status:
-          pkt.klineInitResult.success
-            ? 'SUCCESS'
-            : 'ERROR'
-      });
-
-      this.klineInitResolver?.(
-        pkt.klineInitResult
-      );
-
-      return;
-    }
-
-    // ---------------------------------------------------------
-    // K-LINE FRAME
-    // ---------------------------------------------------------
-
-    if (
-      pkt.cmd ===
-        BinaryCommand.CMD_KLINE_FRAME &&
-      pkt.klineFrameResult
-    ) {
-
-      commLogger.logPacket({
-        direction: '[KLINE RX]',
-        protocol: 'K-LINE',
-        decodedData:
-          'KLINE_FRAME',
-        responseRaw:
-          pkt.klineFrame?.rawHex ||
-          '',
-        durationMs: 0,
-        status:
-          pkt.klineFrameResult.status ===
-          0
-            ? 'SUCCESS'
-            : 'ERROR'
-      });
-
-      this.klineFrameResolver?.(
-        pkt.klineFrameResult
-      );
-
-      return;
-    }
-
-    // ---------------------------------------------------------
-    // K-LINE STATUS
-    // ---------------------------------------------------------
-
-    if (
-      pkt.cmd ===
-        BinaryCommand.CMD_KLINE_STATUS_RESP &&
-      pkt.klineStatus
-    ) {
-
-      this.klineStatusResolver?.(
-        pkt.klineStatus
-      );
-
+  rxLen = cleanRxLen;
+  for (size_t i = 0; i < cleanRxLen; i++) rxBuf[i] = cleanRx[i];
+
+  klineState.lastErrorCode = KLINE_STATUS_SUCCESS;
+  return KLINE_STATUS_SUCCESS;
+}
+
+void initCAN(uint32_t speedKbps) {
+  twai_stop();
+  twai_driver_uninstall();
+
+  twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN, TWAI_MODE_NORMAL);
+  g_config.rx_queue_len = 32;
+  g_config.tx_queue_len = 16;
+
+  twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
+  if (speedKbps == 250) t_config = TWAI_TIMING_CONFIG_250KBITS();
+  else if (speedKbps == 125) t_config = TWAI_TIMING_CONFIG_125KBITS();
+
+  twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+
+  if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
+    if (twai_start() == ESP_OK) {
+      stats.canInitialized = true;
+      currentCanSpeedKbps = speedKbps;
       return;
     }
   }
+  stats.canInitialized = false;
+}
 
-  // ---------------------------------------------------------------------------
-  // WEB SERIAL RX LOOP
-  // ---------------------------------------------------------------------------
+void setup() {
+  Serial.begin(115200);
+  pinMode(STATUS_LED_PIN, OUTPUT);
+  initCAN(CAN_DEFAULT_SPEED_KBPS);
+  if (SerialBT.begin(BT_DEVICE_NAME)) {}
+  IPAddress local_ip(192, 168, 4, 1);
+  IPAddress gateway(192, 168, 4, 1);
+  IPAddress subnet(255, 255, 255, 0);
+  WiFi.mode(WIFI_AP);
+  WiFi.softAPConfig(local_ip, gateway, subnet);
+  if (WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASS)) {
+    tcpServer.begin();
+    tcpServer.setNoDelay(true);
+  }
+}
 
-  private async startSerialReadLoop():
-    Promise<void> {
+void loop() {
+  if (tcpServer.hasClient()) {
+    if (!tcpClient || !tcpClient.connected()) {
+      if (tcpClient) tcpClient.stop();
+      tcpClient = tcpServer.available();
+      tcpClient.setNoDelay(true);
+      stats.wifiClientConnected = true;
+    }
+  }
 
-    while (
-      this.serialPort &&
-      this.serialPort.readable
-    ) {
+  if (tcpClient && tcpClient.connected()) {
+    while (tcpClient.available()) {
+      if (wifiRxHead < RX_STREAM_BUF_SIZE) wifiRxBuf[wifiRxHead++] = tcpClient.read();
+      else wifiRxHead = 0;
+    }
+    if (wifiRxHead >= 7) processStreamBuffer(wifiRxBuf, wifiRxHead, false);
+  }
 
-      try {
+  if (SerialBT.available()) {
+    while (SerialBT.available()) {
+      if (btRxHead < RX_STREAM_BUF_SIZE) btRxBuf[btRxHead++] = SerialBT.read();
+      else btRxHead = 0;
+    }
+    if (btRxHead >= 7) processStreamBuffer(btRxBuf, btRxHead, true);
+  }
 
-        this.reader =
-          this.serialPort.readable
-            .getReader();
+  if (stats.canInitialized) {
+    twai_message_t rxMsg;
+    while (twai_receive(&rxMsg, 0) == ESP_OK) {
+      stats.messagesReceived++;
+      uint8_t payload[14];
+      payload[0] = (rxMsg.identifier >> 24) & 0xFF;
+      payload[1] = (rxMsg.identifier >> 16) & 0xFF;
+      payload[2] = (rxMsg.identifier >> 8) & 0xFF;
+      payload[3] = rxMsg.identifier & 0xFF;
+      payload[4] = (rxMsg.extd ? 0x01 : 0x00) | (rxMsg.rtr ? 0x02 : 0x00);
+      payload[5] = rxMsg.data_length_code;
+      for (int i = 0; i < rxMsg.data_length_code && i < 8; i++) payload[6 + i] = rxMsg.data[i];
+      broadcastBinaryPacket(CMD_CAN_FRAME, payload, 6 + rxMsg.data_length_code);
+    }
+  }
+  yield();
+}
 
-        while (true) {
+uint8_t calculateChecksum(uint8_t cmd, uint16_t len, const uint8_t* payload) {
+  uint8_t cs = cmd ^ ((len >> 8) & 0xFF) ^ (len & 0xFF);
+  for (uint16_t i = 0; i < len; i++) cs ^= payload[i];
+  return cs;
+}
 
-          const {
-            value,
-            done
-          } =
-            await this.reader.read();
-
-          if (done) {
-            break;
-          }
-
-          if (value) {
-            this.handleIncomingData(
-              value
-            );
-          }
-        }
-
-      } catch (error) {
-
-        console.error(
-          '[SERIAL-RX] Read loop error',
-          error
-        );
-
-        break;
-
-      } finally {
-
-        if (this.reader) {
-
-          try {
-            this.reader.releaseLock();
-          } catch {}
-
-          this.reader = null;
+void processStreamBuffer(uint8_t* buffer, size_t& head, bool fromBluetooth) {
+  size_t i = 0;
+  while (i + 7 <= head) {
+    if (buffer[i] == PROTOCOL_MAGIC_1 && buffer[i + 1] == PROTOCOL_MAGIC_2) {
+      uint8_t cmd = buffer[i + 2];
+      uint16_t len = (buffer[i + 3] << 8) | buffer[i + 4];
+      size_t totalPacketLen = 2 + 1 + 2 + len + 1 + 2;
+      if (i + totalPacketLen <= head) {
+        const uint8_t* payload = &buffer[i + 5];
+        uint8_t checksum = buffer[i + 5 + len];
+        uint8_t tr1 = buffer[i + 5 + len + 1];
+        uint8_t tr2 = buffer[i + 5 + len + 2];
+        if (checksum == calculateChecksum(cmd, len, payload) && tr1 == PROTOCOL_TRAILER_1 && tr2 == PROTOCOL_TRAILER_2) {
+          handleParsedCommand(cmd, len, payload, fromBluetooth);
+          i += totalPacketLen;
+          continue;
         }
       }
     }
+    i++;
   }
+  if (i > 0) {
+    size_t remaining = head - i;
+    for (size_t k = 0; k < remaining; k++) buffer[k] = buffer[i + k];
+    head = remaining;
+  }
+}
 
-  // ---------------------------------------------------------------------------
-  // NATIVE BLUETOOTH RX LOOP
-  // ---------------------------------------------------------------------------
-
-  private async startNativeBtReadLoop():
-    Promise<void> {
-
-    /**
-     * Remove previous listeners before creating new ones.
-     */
-    try {
-      await this.nativeDataListener?.remove();
-    } catch {}
-
-    try {
-      await this.nativeDisconnectListener?.remove();
-    } catch {}
-
-    this.nativeDataListener =
-      null;
-
-    this.nativeDisconnectListener =
-      null;
-
-    this.nativeDataListener =
-      await (
-        BluetoothSpp as any
-      ).addListener(
-        'onBluetoothData',
-        (info: any) => {
-
-          if (
-            !info ||
-            info.data == null
-          ) {
-            return;
-          }
-
-          try {
-
-            const bytes =
-              this.normalizeIncomingBytes(
-                info.data
-              );
-
-            if (
-              bytes.length === 0
-            ) {
-              return;
-            }
-
-            this.handleIncomingData(
-              bytes
-            );
-
-          } catch (error) {
-
-            console.error(
-              '[BT-NATIVE-RX] Invalid data',
-              error
-            );
+void handleParsedCommand(uint8_t cmd, uint16_t len, const uint8_t* payload, bool fromBluetooth) {
+  switch (cmd) {
+    case CMD_CAN_FRAME: {
+      if (len >= 6 && stats.canInitialized) {
+        uint32_t canId = ((uint32_t)payload[0] << 24) | ((uint32_t)payload[1] << 16) | ((uint32_t)payload[2] << 8) | (uint32_t)payload[3];
+        uint8_t flags = payload[4];
+        uint8_t dlc = payload[5];
+        twai_message_t txMsg;
+        txMsg.identifier = canId;
+        txMsg.extd = (flags & 0x01) ? 1 : 0;
+        txMsg.rtr = (flags & 0x02) ? 1 : 0;
+        txMsg.data_length_code = min((int)dlc, 8);
+        for (int b = 0; b < txMsg.data_length_code; b++) txMsg.data[b] = payload[6 + b];
+        esp_err_t err = twai_transmit(&txMsg, pdMS_TO_TICKS(20));
+        if (err == ESP_OK) stats.messagesSent++;
+        else {
+          stats.txErrorCount++;
+          twai_status_info_t s_info;
+          if (twai_get_status_info(&s_info) == ESP_OK) {
+            if (s_info.state == TWAI_STATE_BUS_OFF) twai_initiate_recovery();
+            else if (s_info.state == TWAI_STATE_STOPPED) twai_start();
           }
         }
-      );
-
-    this.nativeDisconnectListener =
-      await (
-        BluetoothSpp as any
-      ).addListener(
-        'onBluetoothDisconnect',
-        () => {
-
-          console.warn(
-            '[BT-NATIVE] Remote Bluetooth disconnect'
-          );
-
-          void this.handleNativeDisconnect();
-        }
-      );
-  }
-
-  private async handleNativeDisconnect():
-    Promise<void> {
-
-    if (
-      this.status ===
-      'DISCONNECTED'
-    ) {
-      return;
+      }
+      break;
     }
-
-    /**
-     * false is critical here.
-     *
-     * The native side already told us that Bluetooth
-     * disconnected. Calling BluetoothSpp.disconnect() again
-     * can create recursion/errors in some plugins.
-     */
-    await this.cleanupConnectionResources(
-      false
-    );
-
-    this.rxBuffer =
-      new Uint8Array(0);
-
-    this.asciiRxBuffer =
-      '';
-
-    this.rawState =
-      'DISCONNECTED';
-
-    this.setStatus(
-      'DISCONNECTED',
-      'Bluetooth device disconnected'
-    );
+    case CMD_PING: { sendPong(fromBluetooth); break; }
+    case CMD_CAN_STATUS_REQ: { sendCanStatus(fromBluetooth); break; }
+    case CMD_CONFIG_CAN: {
+      if (len >= 2) {
+        uint16_t speedKbps = ((uint16_t)payload[0] << 8) | payload[1];
+        initCAN(speedKbps);
+      }
+      break;
+    }
+    case CMD_CONFIG_PROTOCOL: {
+      if (len >= 1) {
+        uint8_t protoId = payload[0];
+        if (protoId >= KLINE_PROTO_CAN_11_500 && protoId <= KLINE_PROTO_CAN_29_250) {
+          uint32_t speed = (protoId == KLINE_PROTO_CAN_11_250 || protoId == KLINE_PROTO_CAN_29_250) ? 250 : 500;
+          initCAN(speed);
+        } else if (protoId == KLINE_PROTO_KWP2000_FAST) {
+          initKlineKwpFast();
+        } else if (protoId == KLINE_PROTO_ISO9141_SLOW || protoId == KLINE_PROTO_KWP2000_SLOW) {
+          initKlineIso9141();
+        }
+      }
+      break;
+    }
+    case CMD_KLINE_INIT: {
+      uint8_t protoId = (len >= 1) ? payload[0] : KLINE_PROTO_AUTO;
+      uint8_t status = KLINE_STATUS_INIT_FAILED;
+      if (protoId == KLINE_PROTO_KWP2000_FAST) status = initKlineKwpFast();
+      else if (protoId == KLINE_PROTO_ISO9141_SLOW || protoId == KLINE_PROTO_KWP2000_SLOW) status = initKlineIso9141();
+      else {
+        status = initKlineKwpFast();
+        if (status != KLINE_STATUS_SUCCESS) status = initKlineIso9141();
+      }
+      uint8_t respPayload[4];
+      respPayload[0] = status;
+      respPayload[1] = klineState.activeProtocol;
+      respPayload[2] = klineState.keyByte1;
+      respPayload[3] = klineState.keyByte2;
+      broadcastBinaryPacket(CMD_KLINE_INIT_RESP, respPayload, 4);
+      break;
+    }
+    case CMD_KLINE_FRAME: {
+      if (len >= 1) {
+        uint8_t rxBuf[64];
+        size_t rxLen = 0;
+        uint8_t status = transceiveKlineFrame(payload, len, rxBuf, rxLen, 500);
+        uint8_t respBuf[65];
+        respBuf[0] = status;
+        for (size_t i = 0; i < rxLen; i++) respBuf[1 + i] = rxBuf[i];
+        broadcastBinaryPacket(CMD_KLINE_FRAME, respBuf, 1 + rxLen);
+      }
+      break;
+    }
+    case CMD_KLINE_STATUS_REQ: { sendKlineStatus(fromBluetooth); break; }
+    default: break;
   }
+}
+
+void broadcastBinaryPacket(uint8_t cmd, const uint8_t* payload, uint16_t len) {
+  uint16_t totalLen = 2 + 1 + 2 + len + 1 + 2;
+  uint8_t frame[256];
+  if (totalLen > sizeof(frame)) return;
+  frame[0] = PROTOCOL_MAGIC_1;
+  frame[1] = PROTOCOL_MAGIC_2;
+  frame[2] = cmd;
+  frame[3] = (len >> 8) & 0xFF;
+  frame[4] = len & 0xFF;
+  for (uint16_t i = 0; i < len; i++) frame[5 + i] = payload[i];
+  uint8_t cs = calculateChecksum(cmd, len, payload);
+  frame[5 + len] = cs;
+  frame[5 + len + 1] = PROTOCOL_TRAILER_1;
+  frame[5 + len + 2] = PROTOCOL_TRAILER_2;
+
+  if (tcpClient && tcpClient.connected()) tcpClient.write(frame, totalLen);
+  if (SerialBT.hasClient()) SerialBT.write(frame, totalLen);
+}
+
+void sendPong(bool toBluetooth) {
+  uint8_t pongPayload[9];
+  uint32_t uptime = millis();
+  uint32_t freeHeap = ESP.getFreeHeap();
+  pongPayload[0] = (uptime >> 24) & 0xFF;
+  pongPayload[1] = (uptime >> 16) & 0xFF;
+  pongPayload[2] = (uptime >> 8) & 0xFF;
+  pongPayload[3] = uptime & 0xFF;
+  pongPayload[4] = stats.canInitialized ? 0x01 : 0x00;
+  pongPayload[5] = (freeHeap >> 24) & 0xFF;
+  pongPayload[6] = (freeHeap >> 16) & 0xFF;
+  pongPayload[7] = (freeHeap >> 8) & 0xFF;
+  pongPayload[8] = freeHeap & 0xFF;
+  broadcastBinaryPacket(CMD_PONG, pongPayload, 9);
+}
+
+void sendCanStatus(bool toBluetooth) {
+  twai_status_info_t twai_status;
+  twai_get_status_info(&twai_status);
+  uint8_t statusPayload[21];
+  statusPayload[0] = (twai_status.state == TWAI_STATE_RUNNING) ? 0 : (twai_status.state == TWAI_STATE_STOPPED) ? 1 : (twai_status.state == TWAI_STATE_BUS_OFF) ? 2 : 3;
+  uint32_t speed = currentCanSpeedKbps * 1000;
+  statusPayload[1] = (speed >> 24) & 0xFF;
+  statusPayload[2] = (speed >> 16) & 0xFF;
+  statusPayload[3] = (speed >> 8) & 0xFF;
+  statusPayload[4] = speed & 0xFF;
+  statusPayload[5] = twai_status.tx_error_counter;
+  statusPayload[6] = twai_status.rx_error_counter;
+  statusPayload[7] = (twai_status.rx_overrun_count >> 8) & 0xFF;
+  statusPayload[8] = twai_status.rx_overrun_count & 0xFF;
+  statusPayload[9] = twai_status.msgs_to_rx;
+  statusPayload[10] = (stats.messagesSent >> 24) & 0xFF;
+  statusPayload[11] = (stats.messagesSent >> 16) & 0xFF;
+  statusPayload[12] = (stats.messagesSent >> 8) & 0xFF;
+  statusPayload[13] = stats.messagesSent & 0xFF;
+  statusPayload[14] = (stats.messagesReceived >> 24) & 0xFF;
+  statusPayload[15] = (stats.messagesReceived >> 16) & 0xFF;
+  statusPayload[16] = (stats.messagesReceived >> 8) & 0xFF;
+  statusPayload[17] = stats.messagesReceived & 0xFF;
+  broadcastBinaryPacket(CMD_CAN_STATUS_RESP, statusPayload, 21);
+}
+
+void sendKlineStatus(bool toBluetooth) {
+  uint8_t statusPayload[8];
+  statusPayload[0] = checkKlineIdleState() ? 0x01 : 0x00;
+  statusPayload[1] = klineState.activeProtocol;
+  statusPayload[2] = klineState.initialized ? 0x01 : 0x00;
+  statusPayload[3] = (klineState.rxErrorCount >> 8) & 0xFF;
+  statusPayload[4] = klineState.rxErrorCount & 0xFF;
+  statusPayload[5] = (klineState.txErrorCount >> 8) & 0xFF;
+  statusPayload[6] = klineState.txErrorCount & 0xFF;
+  statusPayload[7] = klineState.lastErrorCode;
+  broadcastBinaryPacket(CMD_KLINE_STATUS_RESP, statusPayload, 8);
 }

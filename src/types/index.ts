@@ -212,6 +212,7 @@ export interface CanFrame {
   direction: 'Rx' | 'Tx';
   isExtended: boolean;
   description?: string;
+  seq?: number;
 }
 
 export type CommDirection = 'APP -> ESP32' | 'ESP32 -> ECU' | 'ECU -> ESP32' | 'ESP32 -> APP';

@@ -8,6 +8,7 @@ import { AppLogger } from '../logging/logger';
 import { translations } from '../i18n/translations';
 import { BinaryProtocol, BinaryCommand } from '../network/binaryProtocol';
 import { transportManager } from '../network/TransportManager';
+import { canManager } from '../can/canManager';
 import { 
   CheckCircle2, 
   XCircle, 
@@ -187,6 +188,15 @@ export const UnitTestsView: React.FC = () => {
       status: 'IDLE',
       executionTimeMs: 0,
       details: 'Verifies that generated CSV contains TX, CAN-RX, and TIMEOUT records with correct fields'
+    },
+    {
+      id: 'test-can-single-entry',
+      nameEn: 'CAN Single-Entry Pipeline & Listener Lifecycle Audit',
+      nameAr: 'اختبار دخول الإطار مرة واحدة فقط ونزاهة مستمعي CAN Monitor',
+      category: 'CAN Architecture',
+      status: 'IDLE',
+      executionTimeMs: 0,
+      details: 'Asserts 1:1 CAN frame addition to canManager without double entry and verifies listener cleanup'
     }
   ]);
   const [isRunningAll, setIsRunningAll] = useState<boolean>(false);
@@ -425,6 +435,44 @@ export const UnitTestsView: React.FC = () => {
     const t12Pass = parseResCorrupt.packets.length === 0 && parseResCorrupt.remainingBuffer.length > 0;
     const t12Duration = Math.round(performance.now() - t12Start);
     setTests(prev => prev.map(t => (t.id === 'test-checksum-corruption' ? { ...t, status: t12Pass ? 'PASS' : 'FAIL', executionTimeMs: t12Duration } : t)));
+
+    await new Promise(r => setTimeout(r, 80));
+
+    // Run Test 20: CAN Single-Entry & Listener Lifecycle
+    setTests(prev => prev.map(t => (t.id === 'test-can-single-entry' ? { ...t, status: 'RUNNING' } : t)));
+    const t20Start = performance.now();
+
+    const initialFramesCount = canManager.getFrames().length;
+    // Test 1: Subscribe and then Unsubscribe
+    let dummyCount = 0;
+    const unsub = canManager.subscribe(() => { dummyCount++; });
+    unsub(); // Cleanup immediately
+
+    // Test 2: Pass 1 Binary CAN frame packet through active transport decoder
+    const testPacket = BinaryProtocol.encodeCanFrame(0x222, [0x11, 0x22, 0x33], false);
+    const decodedPkt = BinaryProtocol.parseStream(testPacket).packets[0];
+
+    // Trigger frame handling as if received from transport
+    if (decodedPkt && decodedPkt.canFrame) {
+      // Direct call through TransportManager handleCanFrame listener
+      // simulate transport passing frame to its onCanFrame listeners
+      const btTransport = transportManager.getTransport('BLUETOOTH_SPP');
+      // @ts-ignore
+      if (btTransport && btTransport.canFrameListeners) {
+        // @ts-ignore
+        btTransport.canFrameListeners.forEach(l => l(decodedPkt.canFrame));
+      }
+    }
+
+    const finalFramesCount = canManager.getFrames().length;
+    // Expect EXACTLY 1 new frame in canManager (no double entry)
+    const singleEntryOk = (finalFramesCount - initialFramesCount) === 1;
+    // Expect unsubscribed dummy listener was NOT called
+    const listenerCleanupOk = dummyCount === 0;
+
+    const t20Pass = singleEntryOk && listenerCleanupOk;
+    const t20Duration = Math.round(performance.now() - t20Start);
+    setTests(prev => prev.map(t => (t.id === 'test-can-single-entry' ? { ...t, status: t20Pass ? 'PASS' : 'FAIL', executionTimeMs: t20Duration } : t)));
 
     setIsRunningAll(false);
   };

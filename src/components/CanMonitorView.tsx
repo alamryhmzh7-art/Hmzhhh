@@ -24,21 +24,21 @@ interface CanMonitorViewProps {
 
 export const CanMonitorView: React.FC<CanMonitorViewProps> = ({ status }) => {
   const { t, isRtl } = useI18n();
-  const [frames, setFrames] = useState<CanFrame[]>([]);
+  const [frames, setFrames] = useState<CanFrame[]>(() => canManager.getFrames().slice(-150));
   const [isPaused, setIsPaused] = useState<boolean>(false);
   const [filterId, setFilterId] = useState<string>('');
   const [sendCanId, setSendCanId] = useState<string>('0x7DF');
   const [sendDataHex, setSendDataHex] = useState<string>('02 01 0C 00 00 00 00 00');
-  const streamEndRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const [isUserAtBottom, setIsUserAtBottom] = useState<boolean>(true);
   const [isSniffing, setIsSniffing] = useState<boolean>(false);
   const [sniffResult, setSniffResult] = useState<string | null>(null);
 
   const runRawCanSniffTest = () => {
     setIsSniffing(true);
     setSniffResult('Sniffing CAN bus for 5 seconds...');
-    const startTime = Date.now();
 
-    const timer = setTimeout(() => {
+    setTimeout(() => {
       const currentFrames = canManager.getFrames();
       const rxFrames = currentFrames.filter(f => f.direction === 'Rx');
       const txFrames = currentFrames.filter(f => f.direction === 'Tx');
@@ -65,11 +65,27 @@ export const CanMonitorView: React.FC<CanMonitorViewProps> = ({ status }) => {
     return () => unsubscribe();
   }, [isPaused]);
 
+  // Handle user scrolling: check if user is near bottom
+  const handleScroll = () => {
+    if (!scrollContainerRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = scrollContainerRef.current;
+    const atBottom = scrollHeight - scrollTop - clientHeight <= 60;
+    setIsUserAtBottom(atBottom);
+  };
+
+  // Instant scroll to bottom when new frames arrive AND user is at bottom
   useEffect(() => {
-    if (!isPaused) {
-      streamEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (!isPaused && isUserAtBottom && scrollContainerRef.current) {
+      scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
     }
-  }, [frames, isPaused]);
+  }, [frames, isPaused, isUserAtBottom]);
+
+  const jumpToBottom = () => {
+    setIsUserAtBottom(true);
+    if (scrollContainerRef.current) {
+      scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+    }
+  };
 
   const handleSendFrame = async () => {
     if (!sendCanId || !sendDataHex) return;
@@ -262,7 +278,16 @@ export const CanMonitorView: React.FC<CanMonitorViewProps> = ({ status }) => {
       </div>
 
       {/* Stream Terminal Table */}
-      <div className="bg-slate-950 border border-slate-800 rounded-xl overflow-hidden shadow-2xl font-mono text-xs">
+      <div className="relative bg-slate-950 border border-slate-800 rounded-xl overflow-hidden shadow-2xl font-mono text-xs">
+        {!isUserAtBottom && frames.length > 0 && (
+          <button
+            onClick={jumpToBottom}
+            className="absolute bottom-3 right-4 z-10 px-3 py-1.5 rounded-full bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold shadow-lg flex items-center gap-1.5 border border-cyan-400/30"
+          >
+            <span>↓ {isRtl ? 'الانتقال للأسفل' : 'Jump to latest'}</span>
+          </button>
+        )}
+
         {/* Table Header */}
         <div className="grid grid-cols-12 bg-slate-900/90 px-4 py-2.5 text-[11px] font-bold text-slate-400 border-b border-slate-800">
           <div className="col-span-2">{t('canTimestamp')}</div>
@@ -274,7 +299,11 @@ export const CanMonitorView: React.FC<CanMonitorViewProps> = ({ status }) => {
         </div>
 
         {/* Frames List */}
-        <div className="max-h-[480px] overflow-y-auto divide-y divide-slate-900 p-2 space-y-0.5">
+        <div 
+          ref={scrollContainerRef}
+          onScroll={handleScroll}
+          className="max-h-[480px] overflow-y-auto divide-y divide-slate-900 p-2 space-y-0.5"
+        >
           {filteredFrames.length === 0 ? (
             <div className="text-center py-12 text-slate-600 text-xs">
               {isRtl ? 'لم يتم استلام أي إطارات CAN بعد. تأكد من توصيل قطعة ESP32 ووجود نشاط على شبكة السيارة.' : 'No CAN frames received yet. Ensure ESP32 is connected and CAN bus traffic is active.'}
@@ -284,8 +313,8 @@ export const CanMonitorView: React.FC<CanMonitorViewProps> = ({ status }) => {
               const isTx = frame.direction === 'Tx';
               return (
                 <div
-                  key={idx}
-                  className={`grid grid-cols-12 px-2.5 py-1.5 rounded transition-colors hover:bg-slate-900/80 items-center ${
+                  key={frame.seq ?? `${frame.timestamp}-${frame.id}-${idx}`}
+                  className={`grid grid-cols-12 px-2.5 py-1.5 rounded hover:bg-slate-900/80 items-center ${
                     isTx ? 'bg-cyan-950/20 text-cyan-300' : 'text-slate-300'
                   }`}
                 >
@@ -323,7 +352,6 @@ export const CanMonitorView: React.FC<CanMonitorViewProps> = ({ status }) => {
               );
             })
           )}
-          <div ref={streamEndRef} />
         </div>
       </div>
     </div>

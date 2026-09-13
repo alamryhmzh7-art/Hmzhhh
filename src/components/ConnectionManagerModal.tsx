@@ -39,14 +39,6 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
   const [isTestingKline, setIsTestingKline] = useState<boolean>(false);
 
   const loadInitialDevices = () => {
-    const presets: BluetoothDeviceInfo[] = [
-      { name: 'ESP32-OBD-PRO', address: '30:AE:A4:07:0B:42', bonded: true, type: 'CLASSIC_SPP', rssi: -45 },
-      { name: 'OBDII (v1.5 / v2.1)', address: '00:1D:A5:68:98:8B', bonded: true, type: 'CLASSIC_SPP', rssi: -52 },
-      { name: 'V-LINK Bluetooth', address: 'AA:BB:CC:DD:EE:11', bonded: true, type: 'CLASSIC_SPP', rssi: -58 },
-      { name: 'ELM327 Bluetooth', address: '11:22:33:44:55:66', bonded: true, type: 'CLASSIC_SPP', rssi: -60 },
-      { name: 'Viecar OBD2', address: '12:34:56:78:9A:BC', bonded: true, type: 'CLASSIC_SPP', rssi: -65 }
-    ];
-
     let savedList: BluetoothDeviceInfo[] = [];
     try {
       const savedRaw = localStorage.getItem('hamza_obd_custom_bt_devices');
@@ -54,7 +46,7 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
     } catch (e) {}
 
     const listMap = new Map<string, BluetoothDeviceInfo>();
-    [...savedList, ...presets].forEach(d => {
+    savedList.forEach(d => {
       if (d.address) listMap.set(d.address.toUpperCase(), d);
     });
 
@@ -308,34 +300,39 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
                     </p>
                   </div>
 
-                  {/* Quick fallback buttons if restricted in iframe */}
-                  {(transportManager.getTransport().getRawConnectionState?.()?.error?.includes('iframe') ||
-                    transportManager.getTransport().getRawConnectionState?.()?.error?.includes('restricted') ||
-                    transportManager.getTransport().getRawConnectionState?.()?.error?.includes('permissions policy')) && (
-                    <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-rose-900/50">
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          onUpdateConfig({ isMockMode: true });
-                          transportManager.updateConfig({ isMockMode: true });
-                          await transportManager.connect();
-                        }}
-                        className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] transition-all flex items-center gap-1 shadow"
-                      >
-                        <Zap className="w-3 h-3" />
-                        {isRtl ? 'تفعيل الوضع المحاكي (Mock Mode)' : 'Enable Mock Mode (Preview)'}
-                      </button>
+                  {/* Quick action buttons for user convenience */}
+                  <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-rose-900/50">
+                    <button
+                      type="button"
+                      onClick={() => window.open(window.location.href, '_blank')}
+                      className="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-[11px] transition-all flex items-center gap-1.5 shadow"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      {isRtl ? 'فتح التطبيق في تبويب جديد (Open in New Tab)' : 'Open in New Tab'}
+                    </button>
 
-                      <button
-                        type="button"
-                        onClick={() => window.open(window.location.href, '_blank')}
-                        className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-[11px] border border-slate-600 transition-all flex items-center gap-1"
-                      >
-                        <ExternalLink className="w-3 h-3 text-cyan-400" />
-                        {isRtl ? 'فتح في تبويب جديد (Open in New Tab)' : 'Open in New Tab'}
-                      </button>
-                    </div>
-                  )}
+                    <button
+                      type="button"
+                      onClick={() => handleApplyTransportSwitch('WIFI_TCP')}
+                      className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-[11px] border border-slate-600 transition-all flex items-center gap-1"
+                    >
+                      <Wifi className="w-3.5 h-3.5 text-cyan-400" />
+                      {isRtl ? 'التحويل إلى Wi-Fi TCP (192.168.4.1)' : 'Switch to Wi-Fi TCP'}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        onUpdateConfig({ isMockMode: true });
+                        transportManager.updateConfig({ isMockMode: true });
+                        await transportManager.connect();
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] transition-all flex items-center gap-1 shadow"
+                    >
+                      <Zap className="w-3.5 h-3.5" />
+                      {isRtl ? 'تفعيل الوضع المحاكي (Mock Mode)' : 'Enable Mock Mode'}
+                    </button>
+                  </div>
                 </div>
               </div>
             )}

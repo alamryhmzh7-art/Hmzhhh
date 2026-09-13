@@ -501,10 +501,32 @@ export class BluetoothSppTransport implements ITransport {
           );
         }
 
-        const port =
-          await (
+        let port: any;
+        try {
+          const isInIframe = typeof window !== 'undefined' && window.self !== window.top;
+          if (isInIframe) {
+            console.warn('[BT-CONNECT] Running inside iframe. Web Serial is disallowed by iframe Permissions Policy.');
+            throw new Error(
+              'سياسة الأمان (Permissions Policy) تمنع فتح منافذ البلوتوث/Serial داخل إطار المعاينة. يرجى فتح التطبيق في تبويب جديد (Open in new tab) أعلى اليمين لاستخدام Web Serial مباشرة أو تجربة خيار Wi-Fi TCP (192.168.4.1).'
+            );
+          }
+          port = await (
             navigator as any
           ).serial.requestPort();
+        } catch (serialErr: any) {
+          const serialMsg = String(serialErr?.message || serialErr);
+          if (
+            serialMsg.toLowerCase().includes('permissions policy') ||
+            serialMsg.toLowerCase().includes('disallowed') ||
+            serialMsg.toLowerCase().includes('securityerror') ||
+            serialMsg.includes('سياسة الأمان')
+          ) {
+            throw new Error(
+              'سياسة الأمان (Permissions Policy) تمنع فتح منافذ البلوتوث/Serial داخل إطار المعاينة. يرجى فتح التطبيق في تبويب جديد (Open in new tab) أعلى اليمين لاستخدام Web Serial مباشرة أو تجربة خيار Wi-Fi TCP (192.168.4.1).'
+            );
+          }
+          throw serialErr;
+        }
 
         await port.open({
           baudRate: 115200
@@ -654,10 +676,23 @@ export class BluetoothSppTransport implements ITransport {
         errMsg
       );
 
-      console.error(
-        `[BT-CONNECT] FAILED: ${errMsg}`,
-        err
-      );
+      const isSecurityOrUserNotice =
+        errMsg.toLowerCase().includes('permissions policy') ||
+        errMsg.toLowerCase().includes('disallowed') ||
+        errMsg.toLowerCase().includes('securityerror') ||
+        errMsg.toLowerCase().includes('cancelled') ||
+        errMsg.toLowerCase().includes('canceled') ||
+        errMsg.toLowerCase().includes('no port selected') ||
+        errMsg.includes('سياسة الأمان');
+
+      if (isSecurityOrUserNotice) {
+        console.warn(`[BT-CONNECT] Notice: ${errMsg}`);
+      } else {
+        console.error(
+          `[BT-CONNECT] FAILED: ${errMsg}`,
+          err
+        );
+      }
 
       /**
        * Do not allow old listeners/resources to survive
