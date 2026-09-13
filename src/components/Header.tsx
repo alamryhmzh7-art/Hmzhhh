@@ -1,8 +1,10 @@
 import React from 'react';
+import logoImg from '../assets/images/hamza_obd_logo_1789331768510.jpg';
 import { useI18n } from '../i18n/I18nContext';
 import { useTheme } from '../services/ThemeContext';
 import { ConnectionStatus, ConnectionConfig, EcuLinkStatus } from '../types';
 import { useAuth } from '../services/AuthContext';
+import { PWAInstallButton } from './PWAInstallButton';
 import { 
   Activity, 
   Wifi, 
@@ -101,8 +103,13 @@ export const Header: React.FC<HeaderProps> = ({
       <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
         {/* Brand & Subtitle */}
         <div className="flex items-center gap-3">
-          <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center shadow-lg shadow-cyan-500/20 border border-cyan-400/40">
-            <Activity className="h-6 w-6 text-white" />
+          <div className="h-10 w-10 rounded-xl overflow-hidden shadow-lg shadow-cyan-500/20 border border-cyan-400/40 bg-slate-900 flex items-center justify-center shrink-0">
+            <img 
+              src={logoImg} 
+              alt="Hamza OBD Pro Logo" 
+              className="h-full w-full object-cover" 
+              referrerPolicy="no-referrer"
+            />
           </div>
           <div>
             <div className="flex items-center gap-2">
@@ -204,6 +211,9 @@ export const Header: React.FC<HeaderProps> = ({
               <span>{language === 'ar' ? 'فحص الرابط' : 'Check Link'}</span>
             </button>
           )}
+
+          {/* PWA Mobile App Install Button */}
+          <PWAInstallButton />
 
           {/* Theme Toggle (Daylight / Dark) */}
           <button

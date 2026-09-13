@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import logoImg from '../assets/images/hamza_obd_logo_1789331768510.jpg';
 import { useI18n } from '../i18n/I18nContext';
 import { ConnectionConfig, ConnectionStatus, TransportType, BluetoothDeviceInfo, CanBusStatus } from '../types';
 import { transportManager } from '../network/TransportManager';
@@ -207,8 +208,8 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
         {/* Modal Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-950/50">
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-xl bg-cyan-500/10 border border-cyan-500/30 text-cyan-400">
-              <Radio className="w-5 h-5" />
+            <div className="h-9 w-9 rounded-xl overflow-hidden border border-cyan-500/30 bg-slate-900 shrink-0 shadow-md shadow-cyan-500/10">
+              <img src={logoImg} alt="Hamza OBD Pro" className="h-full w-full object-cover" referrerPolicy="no-referrer" />
             </div>
             <div>
               <h3 className="text-lg font-bold text-slate-100 flex items-center gap-2">
