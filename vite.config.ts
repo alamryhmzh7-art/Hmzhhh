@@ -12,6 +12,10 @@ export default defineConfig(() => {
       VitePWA({
         registerType: 'autoUpdate',
         includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'icon.png', 'pwa-192x192.png', 'pwa-512x512.png'],
+        workbox: {
+          maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
+          globPatterns: ['**/*.{js,css,html,ico,png,svg,json}'],
+        },
         manifest: {
           id: '/',
           name: 'HAMZA OBD PRO v3',
@@ -49,6 +53,30 @@ export default defineConfig(() => {
         },
       }),
     ],
+    build: {
+      chunkSizeWarningLimit: 1500,
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (id.includes('node_modules')) {
+              if (id.includes('recharts') || id.includes('d3')) {
+                return 'vendor-charts';
+              }
+              if (id.includes('lucide-react') || id.includes('framer-motion') || id.includes('motion')) {
+                return 'vendor-ui';
+              }
+              if (id.includes('html2canvas') || id.includes('jspdf') || id.includes('html2pdf')) {
+                return 'vendor-pdf';
+              }
+              if (id.includes('@capacitor')) {
+                return 'vendor-capacitor';
+              }
+              return 'vendor';
+            }
+          },
+        },
+      },
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

@@ -13,7 +13,7 @@
 export const ESP32_DUAL_TRANSPORT_FIRMWARE_INO = `/*
  * ============================================================================
  * HAMZA OBD PRO - Production ESP32 Dual-Transport OBD/CAN/K-Line Firmware
- * Build ID: HAMZA-OBD-PRO-AUDITED-V4-CANDISPATCH
+ * Build ID: HAMZA-OBD-PRO-PRODUCTION-V5-AUDITED
  * ============================================================================
  * Hardware & Pins:
  *  - ESP32 WROOM-32 / DevKitC
@@ -27,10 +27,13 @@ export const ESP32_DUAL_TRANSPORT_FIRMWARE_INO = `/*
  * Protocols Supported:
  *  1. HAMZA Binary Protocol (Magic: 0xAA 0x55)
  *  2. ELM327 ASCII Engine (AT Commands + ISO-TP State Machine)
- * Architecture:
- *  - Central CAN RX Dispatcher: Single twai_receive() entry point.
- *  - Full ISO-TP Engine: Handles SF, FF, FC (CTS/WAIT/OVERFLOW), CF with BS & STmin.
- *  - Zero Mock/Fake responses: Real ECU responses or NO DATA error statuses.
+ * Architecture & Integrity:
+ *  - Central CAN RX Dispatcher: Single twai_receive() entry point in loop().
+ *  - Full ISO-TP Engine: SF, FF, FC (CTS/WAIT/OVERFLOW), CF with BS & STmin.
+ *  - Strict Concurrency Lock: Single active ISO-TP transaction to prevent race conditions.
+ *  - Zero Stack Overflows: Streaming responses instead of large stack arrays.
+ *  - Per-Transport Routing: Direct response to origin transport (BT or Wi-Fi).
+ *  - Zero Mock/Fake Data: Real ECU responses only, or NO DATA / CAN ERROR.
  * ============================================================================
  */
 
@@ -44,7 +47,7 @@ export const ESP32_DUAL_TRANSPORT_FIRMWARE_INO = `/*
 // ----------------------------------------------------------------------------
 // Configuration & Definitions
 // ----------------------------------------------------------------------------
-#define FIRMWARE_BUILD_ID         "HAMZA-OBD-PRO-AUDITED-V4-CANDISPATCH"
+#define FIRMWARE_BUILD_ID         "HAMZA-OBD-PRO-PRODUCTION-V5-AUDITED"
 
 #define CAN_TX_PIN                GPIO_NUM_22
 #define CAN_RX_PIN                GPIO_NUM_21
@@ -117,7 +120,7 @@ struct Elm327Config {
   bool spaces;
   uint8_t protocol;       // 0=Auto, 1=ISO9141, 4=KWP Fast, 5=KWP Slow, 6=CAN 11/500, 7=CAN 29/500, 8=CAN 11/250, 9=CAN 29/250
   uint8_t activeProtocol; // Currently resolved protocol
-  bool protocolResolved;  // True if protocol was confirmed by real ECU response
+  bool protocolResolved;  // MUST only be true after real ECU response!
   uint32_t headerId;
   uint32_t filterId;
   bool isExtended;
@@ -131,7 +134,9 @@ BluetoothSerial SerialBT;
 WiFiServer tcpServer(TCP_SERVER_PORT);
 WiFiClient tcpClient;
 
-ActiveTransport activeTransport = TRANSPORT_NONE;
+bool btSubscribedCan = false;
+bool wifiSubscribedCan = false;
+
 uint32_t currentCanSpeedKbps = CAN_DEFAULT_SPEED_KBPS;
 
 struct SystemStats {
@@ -162,12 +167,13 @@ size_t wifiRxHead = 0;
 uint8_t btRxBuf[RX_STREAM_BUF_SIZE];
 size_t btRxHead = 0;
 
-// ISO-TP Engine Definitions
-#define ISO_TP_MAX_BUF_SIZE 4096
+// ISO-TP Engine Definitions (Max ISO-TP standard length is 4095 bytes)
+#define ISO_TP_MAX_BUF_SIZE 4095
 
 struct IsoTpTransaction {
   bool active;
-  bool isTx;                  // true if sending to ECU, false if receiving from ECU
+  ActiveTransport requestingTransport; // Track originating transport for responses
+  bool isTx;                           // true if sending to ECU, false if receiving from ECU
   uint32_t reqHeaderId;
   uint32_t expectedRxId;
   bool isExtended;
@@ -180,6 +186,7 @@ struct IsoTpTransaction {
   uint8_t blockSize;          // Block Size requested
   uint8_t stMin;              // STmin requested
   uint8_t framesInCurrentBlock;
+  uint8_t fcWaitCount;        // Count of FC WAIT frames (max 10)
   
   bool waitFc;                // Waiting for Flow Control frame
   uint8_t fcStatus;           // 0=CTS, 1=WAIT, 2=OVERFLOW
@@ -191,13 +198,13 @@ struct IsoTpTransaction {
   bool completed;
   bool failed;
   const char* errorMsg;
-} isoTp = {false, false, 0, 0, false, {0}, 0, 0, 1, 0, 0, 0, false, 0, false, 0, 300, false, false, NULL};
+} isoTp = {false, TRANSPORT_NONE, false, 0, 0, false, {0}, 0, 0, 1, 0, 0, 0, 0, false, 0, false, 0, 300, false, false, NULL};
 
 // Function Declarations
 void initCAN(uint32_t speedKbps);
 void dispatchCanRx();
 void processIsoTpRxFrame(const twai_message_t& rxMsg);
-void executeIsoTpTransaction(const uint8_t* txBytes, size_t txLen, bool fromBluetooth);
+void executeIsoTpTransaction(const uint8_t* txBytes, size_t txLen, ActiveTransport transport);
 
 bool checkKlineIdleState();
 size_t stripTxEcho(const uint8_t* txBuf, size_t txLen, const uint8_t* rawRxBuf, size_t rawRxLen, uint8_t* cleanRxBuf);
@@ -205,17 +212,18 @@ uint8_t initKlineIso9141();
 uint8_t initKlineKwpFast();
 uint8_t transceiveKlineFrame(const uint8_t* txData, size_t txLen, uint8_t* rxBuf, size_t& rxLen, uint32_t timeoutMs);
 
-void processStreamBuffer(uint8_t* buffer, size_t& head, bool fromBluetooth);
-void handleParsedCommand(uint8_t cmd, uint16_t len, const uint8_t* payload, bool fromBluetooth);
-void sendBinaryPacket(uint8_t cmd, const uint8_t* payload, uint16_t len, bool toBluetooth);
+void processStreamBuffer(uint8_t* buffer, size_t& head, ActiveTransport transport);
+void handleParsedCommand(uint8_t cmd, uint16_t len, const uint8_t* payload, ActiveTransport transport);
+void sendBinaryPacket(uint8_t cmd, const uint8_t* payload, uint16_t len, ActiveTransport transport);
 void broadcastBinaryPacket(uint8_t cmd, const uint8_t* payload, uint16_t len);
-void sendPong(bool toBluetooth);
-void sendCanStatus(bool toBluetooth);
-void sendKlineStatus(bool toBluetooth);
+void sendPong(ActiveTransport transport);
+void sendCanStatus(ActiveTransport transport);
+void sendKlineStatus(ActiveTransport transport);
 uint8_t calculateChecksum(uint8_t cmd, uint16_t len, const uint8_t* payload);
 
-void processElmLine(const char* line, bool fromBluetooth);
-void sendElmResponse(const char* resp, bool toBluetooth);
+void processElmLine(const char* line, ActiveTransport transport);
+void sendElmResponse(const char* resp, ActiveTransport transport);
+void sendElmResponseChunk(const char* chunk, ActiveTransport transport);
 
 // ----------------------------------------------------------------------------
 // K-Line Physical Driver (ISO 9141-2 / ISO 14230-4 KWP2000)
@@ -485,7 +493,7 @@ uint8_t transceiveKlineFrame(const uint8_t* txData, size_t txLen, uint8_t* rxBuf
 }
 
 // ----------------------------------------------------------------------------
-// TWAI (CAN Hardware Driver) & Dispatcher
+// TWAI (CAN Hardware Driver) & Recovery State Machine
 // ----------------------------------------------------------------------------
 void initCAN(uint32_t speedKbps) {
   twai_stop();
@@ -507,6 +515,7 @@ void initCAN(uint32_t speedKbps) {
     speedKbps = 500;
   }
 
+  // Acceptance Filter: promiscuous receive for diagnosis, software filtered in dispatch
   twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
   if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
@@ -549,9 +558,17 @@ void processIsoTpRxFrame(const twai_message_t& rxMsg) {
         isoTp.stMin = rxMsg.data[2];
         isoTp.gotFc = true;
         isoTp.waitFc = false;
+        isoTp.fcWaitCount = 0;
         isoTp.startTime = millis();
-      } else if (fcStatus == 0x1) { // WAIT - Reset timer
-        isoTp.startTime = millis();
+      } else if (fcStatus == 0x1) { // WAIT - Reset phase timer
+        isoTp.fcWaitCount++;
+        if (isoTp.fcWaitCount > 10) {
+          isoTp.failed = true;
+          isoTp.errorMsg = "TOO MANY WAIT";
+          isoTp.active = false;
+        } else {
+          isoTp.startTime = millis();
+        }
       } else if (fcStatus == 0x2) { // OVERFLOW
         isoTp.failed = true;
         isoTp.errorMsg = "OVERFLOW";
@@ -577,7 +594,12 @@ void processIsoTpRxFrame(const twai_message_t& rxMsg) {
         isoTp.currentLen = sfLen;
         isoTp.completed = true;
         isoTp.active = false;
+
+        // Protocol resolved ONLY upon real ECU response!
         elmConfig.protocolResolved = true;
+        if (elmConfig.protocol == 0) {
+          elmConfig.activeProtocol = (isoTp.isExtended) ? PROTO_CAN_29_500 : PROTO_CAN_11_500;
+        }
       } else {
         isoTp.failed = true;
         isoTp.errorMsg = "INVALID SF";
@@ -587,12 +609,13 @@ void processIsoTpRxFrame(const twai_message_t& rxMsg) {
       if (dlc < 8) return;
       uint16_t ffLen = ((uint16_t)(pci & 0x0F) << 8) | rxMsg.data[1];
 
-      // Check Buffer Overflow Limit
-      if (ffLen > ISO_TP_MAX_BUF_SIZE) {
+      // Verify FF length limits (8..4095)
+      if (ffLen < 8 || ffLen > ISO_TP_MAX_BUF_SIZE) {
         // Send FC OVERFLOW (0x32)
+        uint32_t fcCanId = (isoTp.reqHeaderId == 0x7DF) ? (rxMsg.identifier - 8) : isoTp.reqHeaderId;
         twai_message_t fcMsg;
         memset(&fcMsg, 0, sizeof(fcMsg));
-        fcMsg.identifier = (isoTp.reqHeaderId == 0x7DF) ? (rxMsg.identifier - 8) : isoTp.reqHeaderId;
+        fcMsg.identifier = fcCanId;
         fcMsg.extd = isoTp.isExtended ? 1 : 0;
         fcMsg.data_length_code = 8;
         fcMsg.data[0] = 0x32; // FC OVERFLOW
@@ -602,7 +625,7 @@ void processIsoTpRxFrame(const twai_message_t& rxMsg) {
         twai_transmit(&fcMsg, pdMS_TO_TICKS(20));
 
         isoTp.failed = true;
-        isoTp.errorMsg = "OVERFLOW";
+        isoTp.errorMsg = "INVALID FF LEN";
         isoTp.active = false;
         return;
       }
@@ -616,10 +639,13 @@ void processIsoTpRxFrame(const twai_message_t& rxMsg) {
       isoTp.expectedSn = 1;
       isoTp.framesInCurrentBlock = 0;
 
+      // Determine correct FC CAN ID
+      uint32_t fcCanId = (isoTp.reqHeaderId == 0x7DF) ? (rxMsg.identifier - 8) : isoTp.reqHeaderId;
+
       // Send Flow Control CTS (0x30)
       twai_message_t fcMsg;
       memset(&fcMsg, 0, sizeof(fcMsg));
-      fcMsg.identifier = (isoTp.reqHeaderId == 0x7DF) ? (rxMsg.identifier - 8) : isoTp.reqHeaderId;
+      fcMsg.identifier = fcCanId;
       fcMsg.extd = isoTp.isExtended ? 1 : 0;
       fcMsg.data_length_code = 8;
       fcMsg.data[0] = 0x30; // FC CTS
@@ -629,7 +655,12 @@ void processIsoTpRxFrame(const twai_message_t& rxMsg) {
       twai_transmit(&fcMsg, pdMS_TO_TICKS(20));
 
       isoTp.startTime = millis();
+      
+      // Protocol resolved ONLY upon real ECU response!
       elmConfig.protocolResolved = true;
+      if (elmConfig.protocol == 0) {
+        elmConfig.activeProtocol = (isoTp.isExtended) ? PROTO_CAN_29_500 : PROTO_CAN_11_500;
+      }
 
     } else if (frameType == 0x2) { // Consecutive Frame (CF)
       if (isoTp.totalLen == 0) return;
@@ -638,12 +669,12 @@ void processIsoTpRxFrame(const twai_message_t& rxMsg) {
       // Verify Sequence Number
       if (sn != isoTp.expectedSn) {
         isoTp.failed = true;
-        isoTp.errorMsg = "SEQUENCE MISMATCH";
+        isoTp.errorMsg = "SEQ MISMATCH";
         isoTp.active = false;
         return;
       }
 
-      // Increment Sequence Number (1..F, 0..F...)
+      // Next expected sequence number (1..F, 0..F...)
       isoTp.expectedSn = (isoTp.expectedSn + 1) & 0x0F;
 
       size_t copyBytes = dlc - 1;
@@ -670,9 +701,10 @@ void processIsoTpRxFrame(const twai_message_t& rxMsg) {
         isoTp.active = false;
       } else if (isoTp.blockSize != 0 && isoTp.framesInCurrentBlock >= isoTp.blockSize) {
         // Block completed: send another FC CTS
+        uint32_t fcCanId = (isoTp.reqHeaderId == 0x7DF) ? (rxMsg.identifier - 8) : isoTp.reqHeaderId;
         twai_message_t fcMsg;
         memset(&fcMsg, 0, sizeof(fcMsg));
-        fcMsg.identifier = (isoTp.reqHeaderId == 0x7DF) ? (rxMsg.identifier - 8) : isoTp.reqHeaderId;
+        fcMsg.identifier = fcCanId;
         fcMsg.extd = isoTp.isExtended ? 1 : 0;
         fcMsg.data_length_code = 8;
         fcMsg.data[0] = 0x30; // FC CTS
@@ -689,18 +721,30 @@ void processIsoTpRxFrame(const twai_message_t& rxMsg) {
 
 void dispatchCanRx() {
   twai_status_info_t s_info;
-  if (twai_get_status_info(&s_info) != ESP_OK) {
+  esp_err_t statusErr = twai_get_status_info(&s_info);
+
+  if (statusErr != ESP_OK) {
     stats.canInitialized = false;
     return;
   }
 
+  // TWAI State Machine Bus-Off Recovery handling
   if (s_info.state == TWAI_STATE_BUS_OFF) {
     stats.canInitialized = false;
     twai_initiate_recovery();
     return;
+  } else if (s_info.state == TWAI_STATE_RECOVERING) {
+    // Hardware recovery in progress: wait for transition to TWAI_STATE_STOPPED, DO NOT call twai_start()
+    stats.canInitialized = false;
+    return;
   } else if (s_info.state == TWAI_STATE_STOPPED) {
-    twai_start();
-    stats.canInitialized = true;
+    stats.canInitialized = false;
+    if (twai_start() == ESP_OK) {
+      stats.canInitialized = true;
+    }
+    return;
+  } else if (s_info.state != TWAI_STATE_RUNNING) {
+    stats.canInitialized = false;
     return;
   }
 
@@ -788,7 +832,7 @@ void loop() {
       }
     }
     if (wifiRxHead > 0) {
-      processStreamBuffer(wifiRxBuf, wifiRxHead, false);
+      processStreamBuffer(wifiRxBuf, wifiRxHead, TRANSPORT_WIFI);
     }
   } else {
     stats.wifiClientConnected = false;
@@ -804,7 +848,7 @@ void loop() {
       }
     }
     if (btRxHead > 0) {
-      processStreamBuffer(btRxBuf, btRxHead, true);
+      processStreamBuffer(btRxBuf, btRxHead, TRANSPORT_BLUETOOTH);
     }
   }
 
@@ -823,7 +867,7 @@ uint8_t calculateChecksum(uint8_t cmd, uint16_t len, const uint8_t* payload) {
   return cs;
 }
 
-void processStreamBuffer(uint8_t* buffer, size_t& head, bool fromBluetooth) {
+void processStreamBuffer(uint8_t* buffer, size_t& head, ActiveTransport transport) {
   size_t i = 0;
 
   while (i < head) {
@@ -842,7 +886,7 @@ void processStreamBuffer(uint8_t* buffer, size_t& head, bool fromBluetooth) {
 
           if (tr1 == PROTOCOL_TRAILER_1 && tr2 == PROTOCOL_TRAILER_2) {
             if (checksum == calculateChecksum(cmd, len, payload)) {
-              handleParsedCommand(cmd, len, payload, fromBluetooth);
+              handleParsedCommand(cmd, len, payload, transport);
               i += totalPacketLen;
               continue;
             }
@@ -854,11 +898,11 @@ void processStreamBuffer(uint8_t* buffer, size_t& head, bool fromBluetooth) {
       }
     }
 
-    // B. ELM327 ASCII / Text Line Check (Terminated by \r or \n)
+    // B. ELM327 ASCII / Text Line Check (Terminated by \\r or \\n)
     size_t lineEnd = i;
     bool foundLine = false;
     while (lineEnd < head) {
-      if (buffer[lineEnd] == '\r' || buffer[lineEnd] == '\n') {
+      if (buffer[lineEnd] == '\\r' || buffer[lineEnd] == '\\n') {
         foundLine = true;
         break;
       }
@@ -870,11 +914,11 @@ void processStreamBuffer(uint8_t* buffer, size_t& head, bool fromBluetooth) {
       if (lineLen > 0 && lineLen < 128) {
         char lineBuf[128];
         memcpy(lineBuf, &buffer[i], lineLen);
-        lineBuf[lineLen] = '\0';
-        processElmLine(lineBuf, fromBluetooth);
+        lineBuf[lineLen] = '\\0';
+        processElmLine(lineBuf, transport);
       }
       i = lineEnd;
-      while (i < head && (buffer[i] == '\r' || buffer[i] == '\n')) {
+      while (i < head && (buffer[i] == '\\r' || buffer[i] == '\\n')) {
         i++;
       }
       continue;
@@ -899,8 +943,9 @@ void processStreamBuffer(uint8_t* buffer, size_t& head, bool fromBluetooth) {
 // ----------------------------------------------------------------------------
 // HAMZA Binary Protocol Command Handler
 // ----------------------------------------------------------------------------
-void handleParsedCommand(uint8_t cmd, uint16_t len, const uint8_t* payload, bool fromBluetooth) {
-  activeTransport = fromBluetooth ? TRANSPORT_BLUETOOTH : TRANSPORT_WIFI;
+void handleParsedCommand(uint8_t cmd, uint16_t len, const uint8_t* payload, ActiveTransport transport) {
+  if (transport == TRANSPORT_BLUETOOTH) btSubscribedCan = true;
+  if (transport == TRANSPORT_WIFI) wifiSubscribedCan = true;
 
   switch (cmd) {
     case CMD_CAN_FRAME: {
@@ -925,12 +970,19 @@ void handleParsedCommand(uint8_t cmd, uint16_t len, const uint8_t* payload, bool
                            ((uint32_t)payload[2] << 8)  |
                             (uint32_t)payload[3];
           uint8_t flags = payload[4];
+          bool isExtended = (flags & 0x01) != 0;
+          bool isRtr = (flags & 0x02) != 0;
+
+          // Reject invalid CAN IDs or unsupported flags
+          if (isExtended && canId > 0x1FFFFFFF) break;
+          if (!isExtended && canId > 0x7FF) break;
+          if (flags & 0xFC) break;
 
           twai_message_t txMsg;
           memset(&txMsg, 0, sizeof(txMsg));
           txMsg.identifier = canId;
-          txMsg.extd = (flags & 0x01) ? 1 : 0;
-          txMsg.rtr = (flags & 0x02) ? 1 : 0;
+          txMsg.extd = isExtended ? 1 : 0;
+          txMsg.rtr = isRtr ? 1 : 0;
           txMsg.data_length_code = dlc;
 
           for (uint8_t b = 0; b < dlc; b++) {
@@ -953,12 +1005,12 @@ void handleParsedCommand(uint8_t cmd, uint16_t len, const uint8_t* payload, bool
     }
 
     case CMD_PING: {
-      sendPong(fromBluetooth);
+      sendPong(transport);
       break;
     }
 
     case CMD_CAN_STATUS_REQ: {
-      sendCanStatus(fromBluetooth);
+      sendCanStatus(transport);
       break;
     }
 
@@ -974,7 +1026,7 @@ void handleParsedCommand(uint8_t cmd, uint16_t len, const uint8_t* payload, bool
       if (len >= 1) {
         uint8_t protoId = payload[0];
         elmConfig.protocol = protoId;
-        elmConfig.protocolResolved = (protoId != 0);
+        elmConfig.protocolResolved = false; // MUST NOT mark resolved until real ECU response
         if (protoId == PROTO_CAN_11_500 || protoId == PROTO_CAN_29_500) {
           initCAN(500);
           elmConfig.isExtended = (protoId == PROTO_CAN_29_500);
@@ -1008,7 +1060,7 @@ void handleParsedCommand(uint8_t cmd, uint16_t len, const uint8_t* payload, bool
       respPayload[1] = klineState.activeProtocol;
       respPayload[2] = klineState.keyByte1;
       respPayload[3] = klineState.keyByte2;
-      sendBinaryPacket(CMD_KLINE_INIT_RESP, respPayload, 4, fromBluetooth);
+      sendBinaryPacket(CMD_KLINE_INIT_RESP, respPayload, 4, transport);
       break;
     }
 
@@ -1020,13 +1072,13 @@ void handleParsedCommand(uint8_t cmd, uint16_t len, const uint8_t* payload, bool
         uint8_t respBuf[65];
         respBuf[0] = status;
         for (size_t i = 0; i < rxLen && i < 64; i++) respBuf[1 + i] = rxBuf[i];
-        sendBinaryPacket(CMD_KLINE_FRAME, respBuf, 1 + min(rxLen, (size_t)64), fromBluetooth);
+        sendBinaryPacket(CMD_KLINE_FRAME, respBuf, 1 + min(rxLen, (size_t)64), transport);
       }
       break;
     }
 
     case CMD_KLINE_STATUS_REQ: {
-      sendKlineStatus(fromBluetooth);
+      sendKlineStatus(transport);
       break;
     }
 
@@ -1036,17 +1088,27 @@ void handleParsedCommand(uint8_t cmd, uint16_t len, const uint8_t* payload, bool
 }
 
 // ----------------------------------------------------------------------------
-// ELM327 ASCII Command Engine & Real ISO-TP Multi-Frame Executor
+// ELM327 ASCII Command Engine & Streaming ISO-TP Multi-Frame Executor
 // ----------------------------------------------------------------------------
-void sendElmResponse(const char* resp, bool toBluetooth) {
-  if (toBluetooth) {
-    if (SerialBT.hasClient()) SerialBT.print(resp);
-  } else {
-    if (tcpClient && tcpClient.connected()) tcpClient.print(resp);
+void sendElmResponseChunk(const char* chunk, ActiveTransport transport) {
+  if (transport == TRANSPORT_BLUETOOTH) {
+    if (SerialBT.hasClient()) SerialBT.print(chunk);
+  } else if (transport == TRANSPORT_WIFI) {
+    if (tcpClient && tcpClient.connected()) tcpClient.print(chunk);
   }
 }
 
-void executeIsoTpTransaction(const uint8_t* txBytes, size_t txLen, bool fromBluetooth) {
+void sendElmResponse(const char* resp, ActiveTransport transport) {
+  sendElmResponseChunk(resp, transport);
+}
+
+void executeIsoTpTransaction(const uint8_t* txBytes, size_t txLen, ActiveTransport transport) {
+  // Concurrency Lock: prevent race conditions if multiple clients send requests
+  if (isoTp.active) {
+    sendElmResponse("BUSY\\r\\n>", transport);
+    return;
+  }
+
   uint8_t activeP = (elmConfig.protocol == 0) ? elmConfig.activeProtocol : elmConfig.protocol;
   if (activeP == 1 || activeP == 4 || activeP == 5) {
     // K-Line execution
@@ -1055,28 +1117,39 @@ void executeIsoTpTransaction(const uint8_t* txBytes, size_t txLen, bool fromBlue
     uint8_t status = transceiveKlineFrame(txBytes, txLen, rxBuf, rxLen, elmConfig.timeoutMs);
     if (status == STATUS_SUCCESS && rxLen > 0) {
       elmConfig.protocolResolved = true;
-      char hexOut[512];
-      size_t outPos = 0;
+      char chunk[128];
+      size_t chunkPos = 0;
       for (size_t b = 0; b < rxLen; b++) {
-        outPos += sprintf(hexOut + outPos, "%02X", rxBuf[b]);
-        if (elmConfig.spaces && b < rxLen - 1) outPos += sprintf(hexOut + outPos, " ");
+        chunkPos += sprintf(chunk + chunkPos, "%02X", rxBuf[b]);
+        if (elmConfig.spaces && b < rxLen - 1) chunkPos += sprintf(chunk + chunkPos, " ");
+        if (chunkPos >= 100) {
+          sendElmResponseChunk(chunk, transport);
+          chunkPos = 0;
+        }
       }
-      sprintf(hexOut + outPos, "\r\n>");
-      sendElmResponse(hexOut, fromBluetooth);
+      if (chunkPos > 0) sendElmResponseChunk(chunk, transport);
+      sendElmResponse("\\r\\n>", transport);
     } else {
-      sendElmResponse("NO DATA\r\n>", fromBluetooth);
+      sendElmResponse("NO DATA\\r\\n>", transport);
     }
     return;
   }
 
   // CAN ISO-TP Execution
+  twai_status_info_t s_info;
+  if (twai_get_status_info(&s_info) != ESP_OK || s_info.state != TWAI_STATE_RUNNING) {
+    sendElmResponse("CAN ERROR\\r\\n>", transport);
+    return;
+  }
+
   if (txLen == 0 || txLen > ISO_TP_MAX_BUF_SIZE) {
-    sendElmResponse("?\r\n>", fromBluetooth);
+    sendElmResponse("?\\r\\n>", transport);
     return;
   }
 
   // Set up IsoTpTransaction
   isoTp.active = true;
+  isoTp.requestingTransport = transport;
   isoTp.isTx = false;
   isoTp.reqHeaderId = elmConfig.headerId;
   isoTp.expectedRxId = (elmConfig.headerId == 0x7E0) ? 0x7E8 : (elmConfig.headerId + 8);
@@ -1086,11 +1159,12 @@ void executeIsoTpTransaction(const uint8_t* txBytes, size_t txLen, bool fromBlue
   isoTp.completed = false;
   isoTp.failed = false;
   isoTp.errorMsg = NULL;
+  isoTp.fcWaitCount = 0;
   isoTp.startTime = millis();
   isoTp.timeoutMs = elmConfig.timeoutMs;
 
   if (txLen <= 7) {
-    // Send ISO-TP Single Frame (SF)
+    // Single Frame (SF)
     twai_message_t txMsg;
     memset(&txMsg, 0, sizeof(txMsg));
     txMsg.identifier = elmConfig.headerId;
@@ -1103,7 +1177,7 @@ void executeIsoTpTransaction(const uint8_t* txBytes, size_t txLen, bool fromBlue
     esp_err_t err = twai_transmit(&txMsg, pdMS_TO_TICKS(50));
     if (err != ESP_OK) {
       isoTp.active = false;
-      sendElmResponse("CAN ERROR\r\n>", fromBluetooth);
+      sendElmResponse("CAN ERROR\\r\\n>", transport);
       return;
     }
   } else {
@@ -1124,7 +1198,7 @@ void executeIsoTpTransaction(const uint8_t* txBytes, size_t txLen, bool fromBlue
     esp_err_t err = twai_transmit(&txMsg, pdMS_TO_TICKS(50));
     if (err != ESP_OK) {
       isoTp.active = false;
-      sendElmResponse("CAN ERROR\r\n>", fromBluetooth);
+      sendElmResponse("CAN ERROR\\r\\n>", transport);
       return;
     }
 
@@ -1137,7 +1211,7 @@ void executeIsoTpTransaction(const uint8_t* txBytes, size_t txLen, bool fromBlue
 
     if (!isoTp.gotFc || isoTp.failed) {
       isoTp.active = false;
-      sendElmResponse("NO DATA\r\n>", fromBluetooth);
+      sendElmResponse("NO DATA\\r\\n>", transport);
       return;
     }
 
@@ -1190,7 +1264,7 @@ void executeIsoTpTransaction(const uint8_t* txBytes, size_t txLen, bool fromBlue
       framesInBlock++;
     }
 
-    // Switch back to receiving RX response
+    // Switch to receiving ISO-TP payload from ECU
     isoTp.isTx = false;
     isoTp.startTime = millis();
   }
@@ -1204,41 +1278,50 @@ void executeIsoTpTransaction(const uint8_t* txBytes, size_t txLen, bool fromBlue
   isoTp.active = false;
 
   if (isoTp.completed && isoTp.currentLen > 0) {
-    char hexOut[ISO_TP_MAX_BUF_SIZE * 3 + 16];
-    size_t outPos = 0;
+    // Stream response chunk by chunk to avoid 12KB stack allocation
     if (elmConfig.headers) {
-      outPos += sprintf(hexOut + outPos, "%03X ", (unsigned int)isoTp.expectedRxId);
+      char headerBuf[16];
+      sprintf(headerBuf, "%03X ", (unsigned int)isoTp.expectedRxId);
+      sendElmResponseChunk(headerBuf, transport);
     }
+
+    char chunkBuf[128];
+    size_t chunkPos = 0;
+
     for (size_t b = 0; b < isoTp.currentLen; b++) {
-      outPos += sprintf(hexOut + outPos, "%02X", isoTp.buffer[b]);
+      chunkPos += sprintf(chunkBuf + chunkPos, "%02X", isoTp.buffer[b]);
       if (elmConfig.spaces && b < isoTp.currentLen - 1) {
-        outPos += sprintf(hexOut + outPos, " ");
+        chunkPos += sprintf(chunkBuf + chunkPos, " ");
+      }
+      if (chunkPos >= 100) {
+        sendElmResponseChunk(chunkBuf, transport);
+        chunkPos = 0;
       }
     }
-    sprintf(hexOut + outPos, "\r\n>");
-    sendElmResponse(hexOut, fromBluetooth);
+    if (chunkPos > 0) {
+      sendElmResponseChunk(chunkBuf, transport);
+    }
+    sendElmResponse("\\r\\n>", transport);
   } else {
-    sendElmResponse("NO DATA\r\n>", fromBluetooth);
+    sendElmResponse("NO DATA\\r\\n>", transport);
   }
 }
 
-void processElmLine(const char* rawLine, bool fromBluetooth) {
-  activeTransport = fromBluetooth ? TRANSPORT_BLUETOOTH : TRANSPORT_WIFI;
-
+void processElmLine(const char* rawLine, ActiveTransport transport) {
   char clean[128];
   size_t cIdx = 0;
-  for (size_t i = 0; rawLine[i] != '\0' && cIdx < 127; i++) {
-    if (rawLine[i] != ' ' && rawLine[i] != '\r' && rawLine[i] != '\n') {
+  for (size_t i = 0; rawLine[i] != '\\0' && cIdx < 127; i++) {
+    if (rawLine[i] != ' ' && rawLine[i] != '\\r' && rawLine[i] != '\\n') {
       clean[cIdx++] = toupper((unsigned char)rawLine[i]);
     }
   }
-  clean[cIdx] = '\0';
+  clean[cIdx] = '\\0';
 
   if (cIdx == 0) return;
 
   if (elmConfig.echo) {
-    sendElmResponse(rawLine, fromBluetooth);
-    sendElmResponse("\r", fromBluetooth);
+    sendElmResponse(rawLine, transport);
+    sendElmResponse("\\r", transport);
   }
 
   // AT Command Handling
@@ -1257,57 +1340,57 @@ void processElmLine(const char* rawLine, bool fromBluetooth) {
       elmConfig.timeoutMs = 300;
       elmConfig.allowLongMsgs = false;
       elmConfig.autoFormatting = true;
-      sendElmResponse("ELM327 v1.5\r\n>", fromBluetooth);
+      sendElmResponse("ELM327 v1.5\\r\\n>", transport);
     } else if (strcmp(cmd, "E0") == 0) {
       elmConfig.echo = false;
-      sendElmResponse("OK\r\n>", fromBluetooth);
+      sendElmResponse("OK\\r\\n>", transport);
     } else if (strcmp(cmd, "E1") == 0) {
       elmConfig.echo = true;
-      sendElmResponse("OK\r\n>", fromBluetooth);
+      sendElmResponse("OK\\r\\n>", transport);
     } else if (strcmp(cmd, "L0") == 0) {
       elmConfig.linefeed = false;
-      sendElmResponse("OK\r\n>", fromBluetooth);
+      sendElmResponse("OK\\r\\n>", transport);
     } else if (strcmp(cmd, "L1") == 0) {
       elmConfig.linefeed = true;
-      sendElmResponse("OK\r\n>", fromBluetooth);
+      sendElmResponse("OK\\r\\n>", transport);
     } else if (strcmp(cmd, "H0") == 0) {
       elmConfig.headers = false;
-      sendElmResponse("OK\r\n>", fromBluetooth);
+      sendElmResponse("OK\\r\\n>", transport);
     } else if (strcmp(cmd, "H1") == 0) {
       elmConfig.headers = true;
-      sendElmResponse("OK\r\n>", fromBluetooth);
+      sendElmResponse("OK\\r\\n>", transport);
     } else if (strcmp(cmd, "S0") == 0) {
       elmConfig.spaces = false;
-      sendElmResponse("OK\r\n>", fromBluetooth);
+      sendElmResponse("OK\\r\\n>", transport);
     } else if (strcmp(cmd, "S1") == 0) {
       elmConfig.spaces = true;
-      sendElmResponse("OK\r\n>", fromBluetooth);
+      sendElmResponse("OK\\r\\n>", transport);
     } else if (strcmp(cmd, "AL") == 0) {
       elmConfig.allowLongMsgs = true;
-      sendElmResponse("OK\r\n>", fromBluetooth);
+      sendElmResponse("OK\\r\\n>", transport);
     } else if (strcmp(cmd, "CAF0") == 0) {
       elmConfig.autoFormatting = false;
-      sendElmResponse("OK\r\n>", fromBluetooth);
+      sendElmResponse("OK\\r\\n>", transport);
     } else if (strcmp(cmd, "CAF1") == 0) {
       elmConfig.autoFormatting = true;
-      sendElmResponse("OK\r\n>", fromBluetooth);
+      sendElmResponse("OK\\r\\n>", transport);
     } else if (strncmp(cmd, "ST", 2) == 0) {
       if (strlen(cmd + 2) == 0) {
-        sendElmResponse("?\r\n>", fromBluetooth);
+        sendElmResponse("?\\r\\n>", transport);
         return;
       }
       uint32_t val = strtoul(cmd + 2, NULL, 16);
       elmConfig.timeoutMs = (val == 0) ? 300 : (val * 4);
-      sendElmResponse("OK\r\n>", fromBluetooth);
+      sendElmResponse("OK\\r\\n>", transport);
     } else if (strncmp(cmd, "SP", 2) == 0) {
       const char* pStr = cmd + 2;
       if (strlen(pStr) != 1 || pStr[0] < '0' || pStr[0] > '9') {
-        sendElmResponse("?\r\n>", fromBluetooth);
+        sendElmResponse("?\\r\\n>", transport);
         return;
       }
       uint8_t proto = pStr[0] - '0';
       elmConfig.protocol = proto;
-      elmConfig.protocolResolved = (proto != 0);
+      elmConfig.protocolResolved = false; // MUST NOT mark resolved until real ECU response
       if (proto == 6) { initCAN(500); elmConfig.isExtended = false; elmConfig.activeProtocol = 6; }
       else if (proto == 7) { initCAN(500); elmConfig.isExtended = true; elmConfig.activeProtocol = 7; }
       else if (proto == 8) { initCAN(250); elmConfig.isExtended = false; elmConfig.activeProtocol = 8; }
@@ -1315,27 +1398,27 @@ void processElmLine(const char* rawLine, bool fromBluetooth) {
       else if (proto == 1) { initKlineIso9141(); elmConfig.activeProtocol = 1; }
       else if (proto == 4) { initKlineKwpFast(); elmConfig.activeProtocol = 4; }
       else if (proto == 5) { initKlineIso9141(); elmConfig.activeProtocol = 5; }
-      sendElmResponse("OK\r\n>", fromBluetooth);
+      sendElmResponse("OK\\r\\n>", transport);
     } else if (strncmp(cmd, "SH", 2) == 0) {
       const char* hStr = cmd + 2;
       size_t hLen = strlen(hStr);
       if (hLen != 3 && hLen != 8) {
-        sendElmResponse("?\r\n>", fromBluetooth);
+        sendElmResponse("?\\r\\n>", transport);
         return;
       }
       for (size_t k = 0; k < hLen; k++) {
         if (!isxdigit((unsigned char)hStr[k])) {
-          sendElmResponse("?\r\n>", fromBluetooth);
+          sendElmResponse("?\\r\\n>", transport);
           return;
         }
       }
       uint32_t header = strtoul(hStr, NULL, 16);
       elmConfig.headerId = header;
       elmConfig.isExtended = (hLen == 8);
-      sendElmResponse("OK\r\n>", fromBluetooth);
+      sendElmResponse("OK\\r\\n>", transport);
     } else if (strcmp(cmd, "DP") == 0) {
       if (elmConfig.protocol == 0 && !elmConfig.protocolResolved) {
-        sendElmResponse("AUTO, SEARCHING...\r\n>", fromBluetooth);
+        sendElmResponse("AUTO, SEARCHING...\\r\\n>", transport);
       } else {
         uint8_t p = (elmConfig.protocol == 0) ? elmConfig.activeProtocol : elmConfig.protocol;
         char dpBuf[64];
@@ -1350,74 +1433,79 @@ void processElmLine(const char* rawLine, bool fromBluetooth) {
 
         if (elmConfig.protocol == 0) {
           char out[96];
-          sprintf(out, "AUTO, %s\r\n>", dpBuf);
-          sendElmResponse(out, fromBluetooth);
+          sprintf(out, "AUTO, %s\\r\\n>", dpBuf);
+          sendElmResponse(out, transport);
         } else {
           char out[96];
-          sprintf(out, "%s\r\n>", dpBuf);
-          sendElmResponse(out, fromBluetooth);
+          sprintf(out, "%s\\r\\n>", dpBuf);
+          sendElmResponse(out, transport);
         }
       }
     } else if (strcmp(cmd, "DPN") == 0) {
       char dpnStr[16];
       uint8_t p = (elmConfig.protocol == 0) ? elmConfig.activeProtocol : elmConfig.protocol;
       if (elmConfig.protocol == 0) {
-        if (!elmConfig.protocolResolved) sprintf(dpnStr, "A0\r\n>");
-        else sprintf(dpnStr, "A%X\r\n>", p);
+        if (!elmConfig.protocolResolved) sprintf(dpnStr, "A0\\r\\n>");
+        else sprintf(dpnStr, "A%X\\r\\n>", p);
       } else {
-        sprintf(dpnStr, "%X\r\n>", p);
+        sprintf(dpnStr, "%X\\r\\n>", p);
       }
-      sendElmResponse(dpnStr, fromBluetooth);
+      sendElmResponse(dpnStr, transport);
     } else if (strcmp(cmd, "RV") == 0) {
       int rawAdc = adc1_get_raw(ADC1_CHANNEL_6);
       if (rawAdc > 100) {
         float volts = (rawAdc / 4095.0) * 3.3 * 11.0;
         char vStr[32];
-        sprintf(vStr, "%.1fV\r\n>", volts);
-        sendElmResponse(vStr, fromBluetooth);
+        sprintf(vStr, "%.1fV\\r\\n>", volts);
+        sendElmResponse(vStr, transport);
       } else {
         uint8_t pid42Req[2] = {0x01, 0x42};
-        executeIsoTpTransaction(pid42Req, 2, fromBluetooth);
+        executeIsoTpTransaction(pid42Req, 2, transport);
       }
     } else if (strcmp(cmd, "IGN") == 0) {
       int rawAdc = adc1_get_raw(ADC1_CHANNEL_6);
       if (rawAdc > 100) {
         float volts = (rawAdc / 4095.0) * 3.3 * 11.0;
-        sendElmResponse(volts > 11.0f ? "ON\r\n>" : "OFF\r\n>", fromBluetooth);
+        sendElmResponse(volts > 11.0f ? "ON\\r\\n>" : "OFF\\r\\n>", transport);
       } else {
         uint8_t pid00Req[2] = {0x01, 0x00};
-        executeIsoTpTransaction(pid00Req, 2, fromBluetooth);
+        executeIsoTpTransaction(pid00Req, 2, transport);
       }
     } else {
-      sendElmResponse("?\r\n>", fromBluetooth);
+      sendElmResponse("?\\r\\n>", transport);
     }
     return;
   }
 
-  // Hex Diagnostic Command Execution
+  // Hex Diagnostic Command Execution: Check even character length
+  if (cIdx % 2 != 0) {
+    sendElmResponse("?\\r\\n>", transport);
+    return;
+  }
+
   uint8_t txBytes[64];
   size_t txLen = 0;
   for (size_t i = 0; i < cIdx && txLen < 64; i += 2) {
     if (!isxdigit((unsigned char)clean[i]) || !isxdigit((unsigned char)clean[i + 1])) {
-      sendElmResponse("?\r\n>", fromBluetooth);
+      sendElmResponse("?\\r\\n>", transport);
       return;
     }
-    char byteStr[3] = {clean[i], clean[i + 1], '\0'};
+    char byteStr[3] = {clean[i], clean[i + 1], '\\0'};
     txBytes[txLen++] = (uint8_t)strtoul(byteStr, NULL, 16);
   }
 
   if (txLen == 0) {
-    sendElmResponse("?\r\n>", fromBluetooth);
+    sendElmResponse("?\\r\\n>", transport);
     return;
   }
 
-  executeIsoTpTransaction(txBytes, txLen, fromBluetooth);
+  executeIsoTpTransaction(txBytes, txLen, transport);
 }
 
 // ----------------------------------------------------------------------------
-// Binary Response Helpers
+// Binary Response Helpers & Subscription Router
 // ----------------------------------------------------------------------------
-void sendBinaryPacket(uint8_t cmd, const uint8_t* payload, uint16_t len, bool toBluetooth) {
+void sendBinaryPacket(uint8_t cmd, const uint8_t* payload, uint16_t len, ActiveTransport transport) {
   uint16_t totalLen = 2 + 1 + 2 + len + 1 + 2;
   uint8_t frame[280];
   if (totalLen > sizeof(frame)) return;
@@ -1435,9 +1523,9 @@ void sendBinaryPacket(uint8_t cmd, const uint8_t* payload, uint16_t len, bool to
   frame[5 + len + 1] = PROTOCOL_TRAILER_1;
   frame[5 + len + 2] = PROTOCOL_TRAILER_2;
 
-  if (toBluetooth) {
+  if (transport == TRANSPORT_BLUETOOTH) {
     if (SerialBT.hasClient()) SerialBT.write(frame, totalLen);
-  } else {
+  } else if (transport == TRANSPORT_WIFI) {
     if (tcpClient && tcpClient.connected()) tcpClient.write(frame, totalLen);
   }
 }
@@ -1460,17 +1548,15 @@ void broadcastBinaryPacket(uint8_t cmd, const uint8_t* payload, uint16_t len) {
   frame[5 + len + 1] = PROTOCOL_TRAILER_1;
   frame[5 + len + 2] = PROTOCOL_TRAILER_2;
 
-  if (activeTransport == TRANSPORT_BLUETOOTH) {
-    if (SerialBT.hasClient()) SerialBT.write(frame, totalLen);
-  } else if (activeTransport == TRANSPORT_WIFI) {
-    if (tcpClient && tcpClient.connected()) tcpClient.write(frame, totalLen);
-  } else {
-    if (tcpClient && tcpClient.connected()) tcpClient.write(frame, totalLen);
-    else if (SerialBT.hasClient()) SerialBT.write(frame, totalLen);
+  if (btSubscribedCan && SerialBT.hasClient()) {
+    SerialBT.write(frame, totalLen);
+  }
+  if (wifiSubscribedCan && tcpClient && tcpClient.connected()) {
+    tcpClient.write(frame, totalLen);
   }
 }
 
-void sendPong(bool toBluetooth) {
+void sendPong(ActiveTransport transport) {
   uint8_t pongPayload[9];
   uint32_t uptime = millis();
   uint32_t freeHeap = ESP.getFreeHeap();
@@ -1485,10 +1571,10 @@ void sendPong(bool toBluetooth) {
   pongPayload[7] = (freeHeap >> 8) & 0xFF;
   pongPayload[8] = freeHeap & 0xFF;
 
-  sendBinaryPacket(CMD_PONG, pongPayload, 9, toBluetooth);
+  sendBinaryPacket(CMD_PONG, pongPayload, 9, transport);
 }
 
-void sendCanStatus(bool toBluetooth) {
+void sendCanStatus(ActiveTransport transport) {
   twai_status_info_t twai_status;
   esp_err_t statusErr = twai_get_status_info(&twai_status);
 
@@ -1530,10 +1616,10 @@ void sendCanStatus(bool toBluetooth) {
   statusPayload[16] = (stats.messagesReceived >> 8) & 0xFF;
   statusPayload[17] = stats.messagesReceived & 0xFF;
 
-  sendBinaryPacket(CMD_CAN_STATUS_RESP, statusPayload, 21, toBluetooth);
+  sendBinaryPacket(CMD_CAN_STATUS_RESP, statusPayload, 21, transport);
 }
 
-void sendKlineStatus(bool toBluetooth) {
+void sendKlineStatus(ActiveTransport transport) {
   uint8_t statusPayload[8];
   statusPayload[0] = checkKlineIdleState() ? 0x01 : 0x00;
   statusPayload[1] = klineState.activeProtocol;
@@ -1544,6 +1630,6 @@ void sendKlineStatus(bool toBluetooth) {
   statusPayload[6] = klineState.txErrorCount & 0xFF;
   statusPayload[7] = klineState.lastErrorCode;
 
-  sendBinaryPacket(CMD_KLINE_STATUS_RESP, statusPayload, 8, toBluetooth);
+  sendBinaryPacket(CMD_KLINE_STATUS_RESP, statusPayload, 8, transport);
 }
 `;

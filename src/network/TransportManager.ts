@@ -153,6 +153,18 @@ export class TransportManager {
   private requestQueue: Promise<void> = Promise.resolve();
 
 
+  private btStateHistory: Array<{
+    timestamp: string;
+    fromState: ConnectionStatus;
+    toState: ConnectionStatus;
+    durationInPrevStateMs: number;
+    mac: string;
+    error?: string;
+  }> = [];
+
+  private lastBtStateChangeTime = Date.now();
+  private lastBtState: ConnectionStatus = 'DISCONNECTED';
+
   constructor(initialConfig: ConnectionConfig) {
 
     this.config = initialConfig;
@@ -191,18 +203,47 @@ export class TransportManager {
 
 
     /*
-     * Bluetooth state listener
+     * Bluetooth state listener with detailed diagnostic transition logging
      */
     this.btTransport.onStateChange((state, error) => {
+      const now = Date.now();
+      const timeInPrevStateMs = now - this.lastBtStateChangeTime;
+      const fromState = this.lastBtState;
+      this.lastBtState = state;
+      this.lastBtStateChangeTime = now;
+      const timeStr = new Date().toISOString();
+      const targetMac = this.config.bluetoothMacAddress || 'NONE';
+
+      console.log(
+        `[TM-BT-STATE-TRANSITION] [${timeStr}] ${fromState} -> ${state} ` +
+        `(Duration in '${fromState}': ${timeInPrevStateMs}ms) | ` +
+        `Target MAC=${targetMac} (${this.config.bluetoothDeviceName || 'Unspecified'}) | ` +
+        `Error/Details=${error || 'None'}`
+      );
+
+      this.btStateHistory.push({
+        timestamp: timeStr,
+        fromState,
+        toState: state,
+        durationInPrevStateMs: timeInPrevStateMs,
+        mac: targetMac,
+        error: error || undefined,
+      });
+
+      if (this.btStateHistory.length > 50) {
+        this.btStateHistory.shift();
+      }
+
+      if (state === 'DISCONNECTED' && fromState === 'CONNECTED') {
+        console.warn(
+          `[TM-BT-CONNECTION-DROP] Bluetooth SPP connection dropped after ${timeInPrevStateMs}ms of active session! ` +
+          `MAC=${targetMac} | Reason=${error || 'Remote Bluetooth device terminated connection or RFCOMM link lost'}`
+        );
+      }
 
       if (this.activeTransport.type !== 'BLUETOOTH_SPP') {
         return;
       }
-
-      console.log(
-        `[MANAGER] BT SPP Transport State Change: ${state}` +
-        ` (Error: ${error || 'none'})`
-      );
 
       this.notifyStatus(state);
     });
@@ -844,6 +885,65 @@ export class TransportManager {
   }
 
 
+  /**
+   * Directly queries paired Bluetooth devices from the Bluetooth SPP transport layer.
+   */
+  public async getPairedBluetoothDevices(): Promise<BluetoothDeviceInfo[]> {
+    console.log('[TM] Requesting paired Bluetooth devices from BT transport...');
+    return this.btTransport.getPairedDevices();
+  }
+
+  /**
+   * Scans and identifies paired ESP32 / OBD SPP adapters among paired devices.
+   */
+  public async findPairedEsp32Devices(): Promise<{
+    esp32Devices: BluetoothDeviceInfo[];
+    allPairedDevices: BluetoothDeviceInfo[];
+    recommendedDevice: BluetoothDeviceInfo | null;
+  }> {
+    const allPaired = await this.getPairedBluetoothDevices();
+    console.log(`[TM-BT-ID] Inspecting ${allPaired.length} paired Bluetooth device(s) for ESP32/OBD signatures...`);
+    
+    // Common ESP32 / OBD SPP device naming identifiers
+    const esp32Keywords = ['ESP32', 'OBD', 'HAMZA', 'VLINKER', 'ELM327', 'BT-OBD', 'HC-05', 'HC-06', 'OBDII', 'CAR-DIAG'];
+
+    const esp32Devices = allPaired.filter(dev => {
+      const nameUpper = (dev.name || '').toUpperCase();
+      return esp32Keywords.some(kw => nameUpper.includes(kw));
+    });
+
+    console.log(`[TM-BT-ID] Identified ${esp32Devices.length} matched ESP32/OBD device(s):`, esp32Devices);
+
+    let recommendedDevice: BluetoothDeviceInfo | null = null;
+    if (esp32Devices.length > 0) {
+      recommendedDevice = esp32Devices.find(d => d.name?.toUpperCase().includes('ESP32')) 
+        || esp32Devices.find(d => d.name?.toUpperCase().includes('HAMZA')) 
+        || esp32Devices[0];
+    } else if (allPaired.length > 0) {
+      recommendedDevice = allPaired[0];
+      console.warn(`[TM-BT-ID] No explicit ESP32 name keyword match found. Defaulting to first paired device: "${recommendedDevice.name}" (${recommendedDevice.address})`);
+    }
+
+    return {
+      esp32Devices,
+      allPairedDevices: allPaired,
+      recommendedDevice,
+    };
+  }
+
+  /**
+   * Returns connection transition history for diagnostic debugging of connection drops.
+   */
+  public getBtDiagnosticLog() {
+    return {
+      currentStatus: this.btTransport.getState(),
+      rawState: this.btTransport.getRawConnectionState?.(),
+      configuredMac: this.config.bluetoothMacAddress || null,
+      configuredDeviceName: this.config.bluetoothDeviceName || null,
+      stateHistory: [...this.btStateHistory],
+    };
+  }
+
   public async connect(
     config?: Partial<ConnectionConfig>
   ): Promise<boolean> {
@@ -852,9 +952,48 @@ export class TransportManager {
       this.updateConfig(config);
     }
 
-    return this.activeTransport.connect(
-      config
-    );
+    const targetType = this.activeTransport.type;
+    const startTime = Date.now();
+    console.log(`[TM-CONNECT-INIT] Connection attempt initiated. Transport=${targetType}, CurrentState=${this.activeTransport.getState()}`);
+
+    // If Bluetooth SPP, check if MAC address is specified. If not, attempt auto-identifying paired ESP32 device
+    if (targetType === 'BLUETOOTH_SPP' && !this.config.isMockMode) {
+      const currentMac = (this.config.bluetoothMacAddress || '').trim();
+      if (!currentMac) {
+        console.log(`[TM-BT-CONNECT] No Bluetooth MAC address set in config. Auto-scanning paired devices for ESP32...`);
+        try {
+          const { recommendedDevice, esp32Devices, allPairedDevices } = await this.findPairedEsp32Devices();
+          if (recommendedDevice) {
+            console.log(`[TM-BT-CONNECT] Auto-identified paired ESP32 target: "${recommendedDevice.name}" (${recommendedDevice.address})`);
+            this.updateConfig({
+              bluetoothMacAddress: recommendedDevice.address,
+              bluetoothDeviceName: recommendedDevice.name,
+            });
+          } else {
+            console.warn(`[TM-BT-CONNECT] No paired Bluetooth devices found on device! User must pair ESP32 in Android settings first.`);
+          }
+        } catch (err) {
+          console.error(`[TM-BT-CONNECT] Error during paired ESP32 device discovery:`, err);
+        }
+      } else {
+        console.log(`[TM-BT-CONNECT] Connecting to configured Bluetooth MAC: ${currentMac} (${this.config.bluetoothDeviceName || 'Unspecified Name'})`);
+      }
+    }
+
+    try {
+      const result = await this.activeTransport.connect(config);
+      const durationMs = Date.now() - startTime;
+      if (result) {
+        console.log(`[TM-CONNECT-SUCCESS] Connected successfully to ${targetType} in ${durationMs}ms`);
+      } else {
+        console.warn(`[TM-CONNECT-FAIL] Connection to ${targetType} failed after ${durationMs}ms`);
+      }
+      return result;
+    } catch (err: any) {
+      const durationMs = Date.now() - startTime;
+      console.error(`[TM-CONNECT-ERROR] Exception while connecting to ${targetType} after ${durationMs}ms: ${err?.message || err}`, err);
+      throw err;
+    }
   }
 
 

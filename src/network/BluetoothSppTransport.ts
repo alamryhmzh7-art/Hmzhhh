@@ -344,13 +344,27 @@ export class BluetoothSppTransport implements ITransport {
     };
   }
 
+  private lastStatusChangeTimestamp: number = Date.now();
+
   private setStatus(
     newStatus: ConnectionStatus,
     errorMsg?: string
   ): void {
 
-    this.status =
-      newStatus;
+    const prevStatus = this.status;
+    const now = Date.now();
+    const timeInPrevStateMs = now - this.lastStatusChangeTimestamp;
+    this.lastStatusChangeTimestamp = now;
+
+    this.status = newStatus;
+
+    console.log(
+      `[BT-SPP-STATE-TRANSITION] [Gen #${this.connectionGeneration}] ` +
+      `${prevStatus} -> ${newStatus} ` +
+      `(Time in '${prevStatus}': ${timeInPrevStateMs}ms) | ` +
+      `Target MAC=${this.config.bluetoothMacAddress || 'NONE'} | ` +
+      `Error=${errorMsg || 'None'}`
+    );
 
     for (
       const listener of [
@@ -712,6 +726,69 @@ export class BluetoothSppTransport implements ITransport {
   }
 
   // ===========================================================================
+  // PAIRED DEVICES
+  // ===========================================================================
+
+  /**
+   * Directly queries bonded/paired Bluetooth devices from native OS or storage.
+   */
+  public async getPairedDevices(): Promise<BluetoothDeviceInfo[]> {
+    console.log('[BT-SPP] Querying paired Bluetooth devices...');
+    const pairedMap = new Map<string, BluetoothDeviceInfo>();
+
+    try {
+      if (typeof localStorage !== 'undefined') {
+        const savedRaw = localStorage.getItem('hamza_obd_custom_bt_devices');
+        if (savedRaw) {
+          const savedList: BluetoothDeviceInfo[] = JSON.parse(savedRaw);
+          for (const device of savedList) {
+            const address = (device.address || '').trim().toUpperCase();
+            if (address) {
+              pairedMap.set(address, {
+                name: device.name || 'Saved Bluetooth Device',
+                address,
+                bonded: true,
+                type: device.type || 'CLASSIC_SPP'
+              });
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.warn('[BT-SPP] Failed loading saved devices from localStorage', error);
+    }
+
+    if (Capacitor.isNativePlatform()) {
+      try {
+        const pairedResult = await BluetoothSpp.getPairedDevices();
+        const rawPaired = pairedResult?.devices || [];
+        console.log(`[BT-SPP-PAIRED] Native OS returned ${rawPaired.length} paired device(s)`);
+
+        for (const device of rawPaired) {
+          const address = (device.address || '').trim().toUpperCase();
+          if (!address) continue;
+          const devInfo: BluetoothDeviceInfo = {
+            name: device.name || 'Paired Bluetooth Device',
+            address,
+            bonded: true,
+            type: 'CLASSIC_SPP'
+          };
+          pairedMap.set(address, devInfo);
+          console.log(`[BT-SPP-PAIRED] Device: "${devInfo.name}" (${devInfo.address})`);
+        }
+      } catch (error) {
+        console.error('[BT-SPP-PAIRED] Native getPairedDevices call failed:', error);
+      }
+    } else {
+      console.log('[BT-SPP-PAIRED] Web environment - returning saved paired devices');
+    }
+
+    const deviceList = Array.from(pairedMap.values());
+    console.log(`[BT-SPP-PAIRED] Total paired devices available: ${deviceList.length}`);
+    return deviceList;
+  }
+
+  // ===========================================================================
   // SCAN
   // ===========================================================================
 
@@ -749,62 +826,13 @@ export class BluetoothSppTransport implements ITransport {
     try {
 
       // -----------------------------------------------------------------------
-      // SAVED DEVICES
+      // PAIRED DEVICES & SAVED DEVICES
       // -----------------------------------------------------------------------
 
-      try {
-
-        if (
-          typeof localStorage !==
-          'undefined'
-        ) {
-
-          const savedRaw =
-            localStorage.getItem(
-              'hamza_obd_custom_bt_devices'
-            );
-
-          if (savedRaw) {
-
-            const savedList:
-              BluetoothDeviceInfo[] =
-              JSON.parse(
-                savedRaw
-              );
-
-            for (
-              const device of savedList
-            ) {
-
-              const address =
-                (
-                  device.address ||
-                  ''
-                )
-                  .trim()
-                  .toUpperCase();
-
-              if (!address) {
-                continue;
-              }
-
-              devicesMap.set(
-                address,
-                {
-                  ...device,
-                  address
-                }
-              );
-            }
-          }
-        }
-
-      } catch (error) {
-
-        console.warn(
-          '[BT-SCAN] Failed loading saved devices',
-          error
-        );
+      const pairedDevices = await this.getPairedDevices();
+      for (const dev of pairedDevices) {
+        devicesMap.set(dev.address, dev);
+        onDeviceDiscovered?.(dev);
       }
 
       const isNative =
@@ -822,68 +850,6 @@ export class BluetoothSppTransport implements ITransport {
 
         return Array.from(
           devicesMap.values()
-        );
-      }
-
-      // -----------------------------------------------------------------------
-      // PAIRED DEVICES
-      // -----------------------------------------------------------------------
-
-      try {
-
-        const pairedResult =
-          await BluetoothSpp
-            .getPairedDevices();
-
-        const rawPaired =
-          pairedResult?.devices || [];
-
-        for (
-          const device of rawPaired
-        ) {
-
-          const address =
-            (
-              device.address ||
-              ''
-            )
-              .trim()
-              .toUpperCase();
-
-          if (!address) {
-            continue;
-          }
-
-          const devInfo:
-            BluetoothDeviceInfo = {
-
-            name:
-              device.name ||
-              'Paired Bluetooth Device',
-
-            address,
-
-            bonded: true,
-
-            type:
-              'CLASSIC_SPP'
-          };
-
-          devicesMap.set(
-            address,
-            devInfo
-          );
-
-          onDeviceDiscovered?.(
-            devInfo
-          );
-        }
-
-      } catch (error) {
-
-        console.warn(
-          '[BT-SCAN] getPairedDevices failed',
-          error
         );
       }
 
@@ -3106,7 +3072,7 @@ export class BluetoothSppTransport implements ITransport {
             info?.error || ''
           );
 
-          void this.handleNativeDisconnect();
+          void this.handleNativeDisconnect(info);
         }
       );
   }
@@ -3115,7 +3081,7 @@ export class BluetoothSppTransport implements ITransport {
   // NATIVE DISCONNECT
   // ===========================================================================
 
-  private async handleNativeDisconnect():
+  private async handleNativeDisconnect(remoteErrInfo?: any):
     Promise<void> {
 
     /**
@@ -3127,6 +3093,16 @@ export class BluetoothSppTransport implements ITransport {
     ) {
       return;
     }
+
+    const durationInSessionMs = Date.now() - this.lastStatusChangeTimestamp;
+    const dropReason = remoteErrInfo?.error || remoteErrInfo?.message || 'Remote Bluetooth device disconnected RFCOMM link';
+
+    console.warn(
+      `[BT-NATIVE-DISCONNECT-DIAGNOSIS] Connection drop registered! ` +
+      `Session Gen #${this.connectionGeneration} ended after ${durationInSessionMs}ms. ` +
+      `Target MAC=${this.config.bluetoothMacAddress || 'UNKNOWN'}. ` +
+      `Cause: ${dropReason}`
+    );
 
     /**
      * Invalidate current connection immediately.
@@ -3152,7 +3128,7 @@ export class BluetoothSppTransport implements ITransport {
 
     this.setStatus(
       'DISCONNECTED',
-      'Bluetooth device disconnected'
+      `Bluetooth device disconnected: ${dropReason}`
     );
   }
 }

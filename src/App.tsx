@@ -27,6 +27,7 @@ import { UnitTestsView } from './components/UnitTestsView';
 import { SettingsView } from './components/SettingsView';
 import { DiagnosticAuditView } from './components/DiagnosticAuditView';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { GlobalErrorNotification } from './components/GlobalErrorNotification';
 import { 
   Gauge, 
   Activity, 
@@ -144,6 +145,14 @@ const MainApp: React.FC = () => {
       const merged = { ...prev, ...newCfg };
       transportManager.updateConfig(merged);
       
+      if (newCfg.isMockMode !== undefined && newCfg.isMockMode !== prev.isMockMode) {
+        if (newCfg.isMockMode) {
+          transportManager.connect(merged).catch(console.error);
+        } else if (transportManager.isConnected()) {
+          transportManager.disconnect().catch(console.error);
+        }
+      }
+
       // Save changes to Firebase so the settings persist across reloads
       if (user && savePreferences) {
         savePreferences({
@@ -400,6 +409,9 @@ const MainApp: React.FC = () => {
           )}
         </ErrorBoundary>
       </main>
+
+      {/* Global Real-time Error & Diagnostic Interceptor Toast */}
+      <GlobalErrorNotification onNavigateToLogs={setActiveTab} />
 
       {/* Bottom Status Bar */}
       <footer className="bg-slate-900 border-t border-slate-800 px-4 py-2 text-[11px] text-slate-400 font-mono">

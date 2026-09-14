@@ -3,6 +3,7 @@ import { useI18n } from '../i18n/I18nContext';
 import { ToyotaProcedure, TOYOTA_OEM_PROCEDURES } from '../vehicle/toyotaProcedures';
 import { ConnectionStatus } from '../types';
 import { transportManager } from '../network/TransportManager';
+import { AppLogger } from '../logging/logger';
 import { 
   Car, 
   Play, 
@@ -41,6 +42,9 @@ export const ToyotaSpecialView: React.FC<ToyotaSpecialViewProps> = ({ status, ba
     setCurrentStepIdx(-1);
 
     try {
+      if (!transportManager.isConnected()) {
+        throw new Error(isRtl ? 'غير متصل بمحول السيارة (ESP32). يرجى الاتصال عبر Wi-Fi أو Bluetooth أولاً.' : 'Not connected to vehicle adapter (ESP32). Please connect via Wi-Fi or Bluetooth first.');
+      }
       for (let i = 0; i < selectedProc.commandSequence.length; i++) {
         setCurrentStepIdx(i);
         const cmd = selectedProc.commandSequence[i];
@@ -90,7 +94,15 @@ export const ToyotaSpecialView: React.FC<ToyotaSpecialViewProps> = ({ status, ba
       setIsCompleted(true);
     } catch (err: any) {
       console.error(`[TOYOTA-PROC] Failed at step ${currentStepIdx + 1}:`, err);
-      alert(`Procedure Failed: ${err.message}`);
+      const errMsg = err?.message || 'Toyota procedure failed';
+      AppLogger.error(
+        'PROTOCOL',
+        'TOYOTA_PROCEDURE_FAIL',
+        `Toyota procedure "${selectedProc.titleEn}" failed: ${errMsg}`,
+        `فشلت برمجيات تويوتا الخاصة "${selectedProc.titleAr}": ${errMsg}`,
+        `Procedure ID: ${selectedProc.id}, Target ECU: ${selectedProc.targetEcuAddress}`,
+        { error: err }
+      );
     } finally {
       setIsExecuting(false);
       setCurrentStepIdx(-1);

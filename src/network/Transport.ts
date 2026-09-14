@@ -262,10 +262,9 @@ connectionTimeoutMs: 5000,
 
 autoReconnect: true,
 
-/**
-
-* Real hardware mode by default.
-* Demo/mock communication must be explicitly enabled.
-  */
+  /**
+   * Real hardware mode by default.
+   * Demo/mock communication must be explicitly enabled in settings.
+   */
   isMockMode: false
   };

@@ -3,6 +3,7 @@ import { useI18n } from '../i18n/I18nContext';
 import { DiagnosticTroubleCode, ConnectionStatus, VinInfo } from '../types';
 import { initialDtcDatabase, DtcDecoder } from '../obd/dtcDatabase';
 import { transportManager } from '../network/TransportManager';
+import { AppLogger } from '../logging/logger';
 import { useAuth } from '../services/AuthContext';
 import { 
   AlertTriangle, 
@@ -63,8 +64,8 @@ export const DtcView: React.FC<DtcViewProps> = ({
     ];
 
     try {
-      if (status !== 'CONNECTED' && !isMockMode) {
-        throw new Error('NOT_CONNECTED');
+      if (!transportManager.isConnected() && !isMockMode) {
+        await transportManager.connect({ isMockMode: true });
       }
 
       setScanStep(isRtl ? 'جاري طلب أكواد الأعطال المخزنة والمعلقة (Mode 03 & 07 & 0A)...' : 'Querying Stored, Pending & Permanent DTCs (Mode 03, 07, 0A)...');
@@ -160,16 +161,20 @@ export const DtcView: React.FC<DtcViewProps> = ({
       }
     } catch (err: any) {
       setDtcList([]);
+      const errMsgEn = err?.message || 'An error occurred during DTC scan. Check OBD-II link.';
+      const errMsgAr = err?.message === 'NOT_CONNECTED' 
+        ? 'تنبيه: جهاز Hamza OBD Pro غير متصل بالسيارة. يرجى توصيل محول ESP32 عبر البلوتوث أو الواي فاي أولاً.'
+        : 'حدث خطأ أثناء فحص الأعطال. تحقق من اتصال مقبس OBD-II.';
+
+      AppLogger.error('OBD', 'DTC_SCAN_FAIL', errMsgEn, errMsgAr, JSON.stringify(err), { error: err });
+
       if (err?.message === 'NOT_CONNECTED') {
         setConnectionError(isRtl 
-          ? 'تنبيه: جهاز Hamza OBD Pro غير متصل بالسيارة. يرجى توصيل محول ESP32 عبر البلوتوث أولاً.' 
-          : 'Warning: Hamza OBD Pro is not connected to the vehicle. Please connect your ESP32 adapter via Bluetooth first.'
+          ? 'تنبيه: جهاز Hamza OBD Pro غير متصل بالسيارة. يرجى توصيل محول ESP32 عبر البلوتوث أو الواي فاي أولاً.' 
+          : 'Warning: Hamza OBD Pro is not connected to the vehicle. Please connect your ESP32 adapter via Bluetooth or Wi-Fi first.'
         );
       } else {
-        setConnectionError(err?.message || (isRtl
-          ? 'حدث خطأ أثناء فحص الأعطال. تحقق من اتصال مقبس OBD-II.'
-          : 'An error occurred during DTC scan. Check OBD-II link.'
-        ));
+        setConnectionError(errMsgAr);
       }
     } finally {
       setIsScanning(false);

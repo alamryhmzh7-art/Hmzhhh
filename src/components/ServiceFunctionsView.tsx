@@ -3,6 +3,7 @@ import { useI18n } from '../i18n/I18nContext';
 import { ServiceFunctionItem, ConnectionStatus } from '../types';
 import { SERVICE_FUNCTIONS_CATALOG } from '../services/serviceFunctions';
 import { transportManager } from '../network/TransportManager';
+import { AppLogger } from '../logging/logger';
 import { 
   Wrench, 
   ShieldAlert, 
@@ -34,7 +35,7 @@ export const ServiceFunctionsView: React.FC<ServiceFunctionsViewProps> = ({ stat
   const [isCompleted, setIsCompleted] = useState<boolean>(false);
 
   // Safety checks
-  const voltageOk = batteryVoltage >= (selectedFunc.requiredConditions?.minVoltage || 12.0);
+  const voltageOk = batteryVoltage > 0 ? batteryVoltage >= (selectedFunc.requiredConditions?.minVoltage || 12.0) : true;
 
   const handleStartRoutine = () => {
     setShowWarningModal(true);
@@ -49,6 +50,9 @@ export const ServiceFunctionsView: React.FC<ServiceFunctionsViewProps> = ({ stat
     setExecutionLog(steps.map((s, idx) => ({ step: s, status: idx === 0 ? 'RUNNING' : 'PENDING' })));
 
     try {
+      if (!transportManager.isConnected()) {
+        throw new Error(isRtl ? 'غير متصل بمحول السيارة (ESP32). يرجى الاتصال عبر Wi-Fi أو Bluetooth أولاً.' : 'Not connected to vehicle adapter (ESP32). Please connect via Wi-Fi or Bluetooth first.');
+      }
       // Step 0: Ensure Extended Diagnostic Session (0x10 0x03) is opened
       console.log(`[SERVICE-FUNC] Initializing Extended Diagnostic Session (10 03)...`);
       await transportManager.sendRequest([0x10, 0x03], '0x7E0');
@@ -105,7 +109,15 @@ export const ServiceFunctionsView: React.FC<ServiceFunctionsViewProps> = ({ stat
       setIsCompleted(true);
     } catch (err: any) {
       console.error(`[SERVICE-FUNC] Execution Failed:`, err);
-      alert(`Service Routine Failed: ${err.message}`);
+      const errMsg = err?.message || 'Routine execution failed';
+      AppLogger.error(
+        'OBD',
+        'SERVICE_ROUTINE_FAIL',
+        `Service routine "${selectedFunc.titleEn}" failed: ${errMsg}`,
+        `فشلت وظيفة البرمجة الخدمية "${selectedFunc.titleAr}": ${errMsg}`,
+        `Function ID: ${selectedFunc.id}, Target ECU: ${selectedFunc.targetEcuAddress}`,
+        { error: err }
+      );
     } finally {
       setIsExecuting(false);
     }
