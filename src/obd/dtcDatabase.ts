@@ -1,4 +1,5 @@
 import { DiagnosticTroubleCode, DtcStatus } from '../types';
+import { DtcCacheService } from './dtcCacheService';
 
 export const DTC_DATABASE: Record<string, { en: string; ar: string; sys: 'Powertrain (P)' | 'Chassis (C)' | 'Body (B)' | 'Network (U)' | string; sev: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL' }> = {
   'P0300': {
@@ -175,9 +176,28 @@ export class DtcDecoder {
       if (b1 === 0 && b2 === 0) continue;
 
       const code = this.decodeDtcBytes(b1, b2);
+      const cached = DtcCacheService.lookupCode(code);
       const entry = DTC_DATABASE[code];
 
-      if (entry) {
+      if (cached) {
+        results.push({
+          code,
+          descriptionEn: cached.descriptionEn,
+          descriptionAr: cached.descriptionAr,
+          ecu: ecuName,
+          ecuAddressHex: ecuAddr,
+          status,
+          severity: cached.severity as any,
+          system: cached.system,
+          freezeFrameAvailable: true,
+          symptomsEn: cached.symptomsEn,
+          symptomsAr: cached.symptomsAr,
+          causesEn: cached.causesEn,
+          causesAr: cached.causesAr,
+          fixesEn: cached.fixesEn,
+          fixesAr: cached.fixesAr
+        });
+      } else if (entry) {
         results.push({
           code,
           descriptionEn: entry.en,

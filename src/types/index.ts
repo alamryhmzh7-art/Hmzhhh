@@ -167,6 +167,12 @@ export interface DiagnosticTroubleCode {
   freezeFrameAvailable?: boolean;
   freezeFrameData?: FreezeFrameRecord;
   possibleCauses?: string[];
+  symptomsEn?: string[];
+  symptomsAr?: string[];
+  causesEn?: string[];
+  causesAr?: string[];
+  fixesEn?: string[];
+  fixesAr?: string[];
 }
 
 export interface VinInfo {

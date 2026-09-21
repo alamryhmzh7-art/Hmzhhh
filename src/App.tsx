@@ -432,7 +432,7 @@ const MainApp: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-3">
-            <span className="text-cyan-400 font-bold">HAMZA OBD PRO v2.5</span>
+            <span className="text-cyan-400 font-bold">HAMZA OBD PRO v3.0</span>
             <span>|</span>
             <span>Battery: {batteryVoltage.toFixed(2)}V</span>
             <span>|</span>

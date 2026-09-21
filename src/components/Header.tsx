@@ -117,7 +117,7 @@ export const Header: React.FC<HeaderProps> = ({
                 HAMZA <span className="text-cyan-400">OBD PRO</span>
               </h1>
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-400 border border-cyan-800/60 font-mono font-bold">
-                v2.5 PRO
+                v3.0 PRO
               </span>
             </div>
             <p className="text-xs text-slate-400 font-medium">
