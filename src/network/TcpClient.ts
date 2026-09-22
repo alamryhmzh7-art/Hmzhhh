@@ -13,8 +13,8 @@ export interface PacketParserResult {
 
 export class PacketParser {
   public static parse(data: number[]): PacketParserResult {
-    const hex = data.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
-    const ascii = data.map(b => (b >= 32 && b <= 126 ? String.fromCharCode(b) : '.')).join('');
+    const hex = (data || []).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+    const ascii = (data || []).map(b => (b >= 32 && b <= 126 ? String.fromCharCode(b) : '.')).join('');
     const serviceId = data.length > 0 ? data[0] : undefined;
     const isPositiveResponse = data.length > 0 && data[0] !== 0x7F;
 
@@ -201,7 +201,7 @@ export class TCPClient {
     this.sequenceId++;
     const reqSeq = this.sequenceId;
     const startTime = performance.now();
-    const reqHex = requestBytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+    const reqHex = (requestBytes || []).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
 
     // Log APP -> ESP32
     commLogger.logPacket({
@@ -251,7 +251,7 @@ export class TCPClient {
       }
 
       const durationMs = Math.round(performance.now() - startTime);
-      const resHex = responseBytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+      const resHex = (responseBytes || []).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
       const parsed = PacketParser.parse(responseBytes);
 
       // Log ESP32 -> APP

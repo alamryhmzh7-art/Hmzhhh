@@ -134,7 +134,7 @@ export const ServiceFunctionsView: React.FC<ServiceFunctionsViewProps> = ({ stat
               {t('serviceFunctionsTitle')}
             </h2>
             <span className="text-xs px-2 py-0.5 rounded-full bg-amber-950 text-amber-400 border border-amber-800 font-mono font-bold">
-              14 Standard Functions
+              {SERVICE_FUNCTIONS_CATALOG.length} OEM Service Routines
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">

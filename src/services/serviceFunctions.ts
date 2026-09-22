@@ -2,6 +2,120 @@ import { ServiceFunctionItem } from '../types';
 
 export const SERVICE_FUNCTIONS_CATALOG: ServiceFunctionItem[] = [
   {
+    id: 'srv-zero-point-cal',
+    titleEn: 'Accelerometer & Yaw Rate Zero Point Calibration',
+    titleAr: 'معايرة النقطة الصفرية لحساس التسارع والياو (Zero Point Calibration)',
+    descriptionEn: 'Calibrates deceleration, lateral G-sensor, and yaw rate neutral values in ABS/ESP module.',
+    descriptionAr: 'ضبط ومعايرة نقطة الصفر لمستشعر تسارع المركبة وحساس الانعطاف (G-Sensor & Yaw Rate) بعد الصيانة أو وزنية التربيط أو فصل البطارية.',
+    category: 'BRAKES',
+    ecuTarget: 'ABS / ESP / Skid Control ECU (0x7E2)',
+    routineIdHex: '0x0211',
+    supportedVehicles: ['Toyota', 'Lexus', 'Nissan', 'Honda', 'Hyundai', 'Kia', 'Ford'],
+    requiredConditions: {
+      minVoltage: 12.2,
+      ignitionState: 'ON',
+      engineState: 'STOPPED',
+      gearPosition: 'PARK',
+      parkingBrake: 'RELEASED'
+    },
+    warningsEn: [
+      'Park the vehicle on a completely level, flat surface (inclination < 1 degree).',
+      'Keep the steering wheel centered and straight ahead.',
+      'Do not shake or vibrate the vehicle during calibration.'
+    ],
+    warningsAr: [
+      'إيقاف المركبة على أرضية مستوية تماماً (نسبة الميلان أقل من 1 درجة).',
+      'تثبيت عجلة القيادة (الدركسون) في المنتصف بوضع مستقيم للأمام.',
+      'تجنب هز أو تحريك السيارة أثناء إجراء عملية المعايرة.'
+    ],
+    stepsEn: [
+      'Enter Extended Diagnostic Session (0x10 0x03).',
+      'Clear existing calibration memory from Skid Control ECU.',
+      'Send Zero Point Calibration routine command (0x31 01 02 11).',
+      'Wait 4 seconds while G-sensors and yaw rate sensors settle.',
+      'Confirm positive acknowledgment and verify ABS/VSC light status.'
+    ],
+    stepsAr: [
+      'الدخول في جلسة التشخيص الموسعة (0x10 0x03).',
+      'مسح بيانات المعايرة السابقة من كمبيوتر ABS/VSC.',
+      'إرسال أمر روتين المعايرة الصفرية لحساس التسارع (0x31 01 02 11).',
+      'الانتظار لمدة 4 ثوانٍ حتى تثبيت قراءات الحساسات وتصفرها.',
+      'تأكيد استجابة النظام وملاحظة إعادة تعيين الحساس بنجاح.'
+    ]
+  },
+  {
+    id: 'srv-abs-bleed',
+    titleEn: 'ABS Hydraulic Brake System Bleeding Routine',
+    titleAr: 'تنسيم ونزف هواء نظام الفرامل الهيدروليكي (ABS Bleeding)',
+    descriptionEn: 'Cycles internal ABS solenoid valves and pump motor to purge trapped air bubbles from brake actuator unit.',
+    descriptionAr: 'تشغيل صمامات ومضخة نظام ABS إلكترونياً لطرد فقاعات الهواء العالقة داخل وحدة التحكم الهيدروليكية.',
+    category: 'BRAKES',
+    ecuTarget: 'ABS / ESP ECU (0x7E2)',
+    routineIdHex: '0x0245',
+    supportedVehicles: ['Toyota', 'Lexus', 'Nissan', 'Hyundai', 'Kia', 'Ford', 'BMW'],
+    requiredConditions: {
+      minVoltage: 12.4,
+      ignitionState: 'ON',
+      engineState: 'STOPPED',
+      gearPosition: 'PARK',
+      parkingBrake: 'ENGAGED'
+    },
+    warningsEn: [
+      'Brake fluid reservoir must be filled to MAX line with specified brake fluid.',
+      'Depress brake pedal when prompted during solenoid cycling.'
+    ],
+    warningsAr: [
+      'تعبئة علبة زيت الفرامل إلى علامة الحد الأقصى MAX بزيت فرامل مناسب.',
+      'الضغط المستمر على دواسة الفرامل عند طلب التطبيق أثناء عمل الصمامات.'
+    ],
+    stepsEn: [
+      'Connect clear vinyl bleed hose and container to caliper bleeder screw.',
+      'Cycle front and rear ABS solenoid valves and motor pump (0x31 01 02 45).',
+      'Open bleeder screws sequentially until fluid flows free of air bubbles.',
+      'Stop bleed routine (0x31 02 02 45) and top off fluid level.'
+    ],
+    stepsAr: [
+      'توصيل خرطوم التنسيم مع وعاء التجميع ببرغي العجلة.',
+      'تشغيل صمامات ومضخة ABS القسرية لطرد الهواء (0x31 01 02 45).',
+      'فتح براغي التنسيم بالتتابع حتى انقطاع فقاعات الهواء تماماً.',
+      'إيقاف الروتين (0x31 02 02 45) وإعادة ضبط مستوى زيت الفرامل.'
+    ]
+  },
+  {
+    id: 'srv-tpms-reset',
+    titleEn: 'TPMS Tire Pressure Sensor ID Registration',
+    titleAr: 'إعادة ضبط وتسجيل حساسات ضغط الإطارات (TPMS Reset)',
+    descriptionEn: 'Initiates learning routine for registered wheel sensor IDs and clears pressure threshold warning lamps.',
+    descriptionAr: 'بدء روتين تعلّم وقراءة معرّفات مستشعرات ضغط الإطارات ومسح لمبة التنبيه بالعدادات.',
+    category: 'TIRES',
+    ecuTarget: 'TPMS Receiver ECU (0x7C4 / 0x7E7)',
+    routineIdHex: '0x0310',
+    supportedVehicles: ['Toyota', 'Lexus', 'Nissan', 'Hyundai', 'Kia', 'Ford', 'Chevrolet'],
+    requiredConditions: {
+      minVoltage: 12.0,
+      ignitionState: 'ON',
+      engineState: 'STOPPED',
+      gearPosition: 'PARK',
+      parkingBrake: 'ANY'
+    },
+    warningsEn: [
+      'Ensure all 4/5 tires are inflated to placard pressure prior to execution.'
+    ],
+    warningsAr: [
+      'ضبط ضغط جميع الإطارات حسب المعيار الموصى به على الملصق الجانبي قبل الإجراء.'
+    ],
+    stepsEn: [
+      'Verify standard tire pressures on all wheels.',
+      'Send TPMS Registration Routine (0x31 01 03 10).',
+      'Wait for receiver module acknowledge.'
+    ],
+    stepsAr: [
+      'التحقق من ضبط ضغط جميع العجلات بالمستوى الصحيح.',
+      'إرسال أمر روتين إعادة تهيئة صمامات TPMS (0x31 01 03 10).',
+      'انتظار تأكيد استلام المعرّفات من وحدة المستقبِل.'
+    ]
+  },
+  {
     id: 'srv-oil-reset',
     titleEn: 'Oil Service Interval Reset',
     titleAr: 'إعادة ضبط مؤشر تغيير الزيت والصيانة (Oil Reset)',

@@ -272,7 +272,7 @@ export class TransportManager {
 
 
       const data = Array.isArray(frame.dataBytes)
-        ? frame.dataBytes.map(b => b & 0xFF)
+        ? (frame.dataBytes || []).map(b => b & 0xFF)
         : [];
 
 
@@ -286,7 +286,7 @@ export class TransportManager {
         ...frame,
         id: `0x${frameIdNum.toString(16).toUpperCase()}`,
         dataBytes: data,
-        dataHex: data
+        dataHex: (data || [])
           .map(b =>
             b.toString(16)
               .padStart(2, '0')
@@ -488,7 +488,7 @@ export class TransportManager {
           console.warn(
             `[TM-CAN-RX] Ignoring mismatched diagnostic response ` +
             `ID=0x${frameIdNum.toString(16).toUpperCase()} ` +
-            `PAYLOAD=${payloadStart
+            `PAYLOAD=${(payloadStart || [])
               .map(b =>
                 b.toString(16)
                   .padStart(2, '0')
@@ -1304,8 +1304,7 @@ export class TransportManager {
       ) {
 
         const bytes =
-          response.responseRaw
-            .split(/\s+/)
+          (response.responseRaw ? response.responseRaw.split(/\s+/) : [])
             .map(h =>
               parseInt(h, 16)
             )
@@ -1776,7 +1775,7 @@ export class TransportManager {
         .toString(16)
         .toUpperCase()} ` +
       `Len=${sfLength} ` +
-      `Payload=[${payload
+      `Payload=[${(payload || [])
         .map(b =>
           b.toString(16)
             .padStart(2, '0')
@@ -2005,7 +2004,7 @@ export class TransportManager {
           dlc: 8,
 
           dataHex:
-            fcFrame
+            (fcFrame || [])
               .map(b =>
                 b.toString(16)
                   .padStart(2, '0')
@@ -2383,7 +2382,7 @@ export class TransportManager {
         dlc: 8,
 
         dataHex:
-          cfFrame
+          (cfFrame || [])
             .map(b =>
               b.toString(16)
                 .padStart(2, '0')
@@ -2627,13 +2626,13 @@ export class TransportManager {
 
 
     const sanitizedRequest =
-      requestBytes.map(
+      (requestBytes || []).map(
         b => b & 0xFF
       );
 
 
     const reqHex =
-      sanitizedRequest
+      (sanitizedRequest || [])
         .map(b =>
           b.toString(16)
             .padStart(2, '0')
@@ -2718,7 +2717,7 @@ export class TransportManager {
 
 
     const reqHex =
-      requestBytes
+      (requestBytes || [])
         .map(b =>
           b.toString(16)
             .padStart(2, '0')
@@ -2818,7 +2817,7 @@ export class TransportManager {
 
 
       const resHex =
-        responseBytes
+        (responseBytes || [])
           .map(b =>
             b.toString(16)
               .padStart(2, '0')
@@ -2945,7 +2944,7 @@ export class TransportManager {
       ) {
 
         const resHex =
-          klineResult.data
+          (klineResult.data || [])
             .map(b =>
               b.toString(16)
                 .padStart(2, '0')
@@ -3295,7 +3294,7 @@ export class TransportManager {
         `ID=0x${numCanId
           .toString(16)
           .toUpperCase()} ` +
-        `DATA=[${firstFrame
+        `DATA=[${(firstFrame || [])
           .map(b =>
             b.toString(16)
               .padStart(2, '0')
@@ -3350,7 +3349,7 @@ export class TransportManager {
           firstFrame.length,
 
         dataHex:
-          firstFrame
+          (firstFrame || [])
             .map(b =>
               b.toString(16)
                 .padStart(2, '0')
@@ -3388,7 +3387,7 @@ export class TransportManager {
         dlc:
           firstFrame.length,
         requestRaw:
-          firstFrame
+          (firstFrame || [])
             .map(b =>
               b.toString(16)
                 .padStart(2, '0')
@@ -3474,7 +3473,7 @@ export class TransportManager {
 
 
       const resHex =
-        responseBytes
+        (responseBytes || [])
           .map(b =>
             b.toString(16)
               .padStart(2, '0')

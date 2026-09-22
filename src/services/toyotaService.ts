@@ -77,21 +77,67 @@ export interface ToyotaRoutine {
 
 export const TOYOTA_ROUTINES: ToyotaRoutine[] = [
   {
+    idHex: '0x0211',
+    routineId: 0x0211,
+    nameEn: 'Zero Point Calibration (Deceleration & Yaw Rate Sensors)',
+    nameAr: 'معايرة النقطة الصفرية لحساس التسارع والياو (Zero Point Calibration)',
+    targetEcuAddrHex: '0x7E2',
+    targetEcuName: 'ABS / VSC / Skid Control ECU',
+    descriptionEn: 'Calibrates yaw-rate, lateral acceleration, and steering angle neutral points in Skid Control ECU.',
+    descriptionAr: 'معايرة مستشعرات زاوية التوجيه والانعطاف ومستشعر G-Sensor عند استبدال قطع نظام الفرامل، ضبط زوايا العجلات، أو مسح الذاكرة العشوائية.',
+    prerequisitesEn: [
+      'Park the vehicle on a level, flat surface (inclination < 1 degree).',
+      'Keep the steering wheel centered and straight ahead.',
+      'Shift gear to PARK (P) and release the parking brake.',
+      'Ignition Switch ON (Engine OFF). Do not shake or vibrate the vehicle during calibration.',
+      'Battery voltage > 12.2V.'
+    ],
+    prerequisitesAr: [
+      'إيقاف المركبة على أرضية مستوية تماماً (نسبة الميلان أقل من 1 درجة).',
+      'تثبيت عجلة القيادة (الدركسون) في المنتصف بوضع مستقيم للأمام.',
+      'وضع ناقل الحركة في وضع التوقف (P) وتحرير فرامل اليد.',
+      'فتح السويتش على وضع التشغيل ON (والمحرك متوقف OFF). تجنب هز أو تحريك السيارة أثناء المعايرة.',
+      'جهد البطارية 12.2 فولت على الأقل.'
+    ],
+    requiresSecurityAccess: false
+  },
+  {
+    idHex: '0x0245',
+    routineId: 0x0245,
+    nameEn: 'ABS Hydraulic Brake System Bleeding',
+    nameAr: 'تنسيم ونزف هواء نظام الفرامل الهيدروليكي (ABS Bleeding)',
+    targetEcuAddrHex: '0x7E2',
+    targetEcuName: 'ABS / VSC / Brake Actuator ECU',
+    descriptionEn: 'Cycles internal ABS solenoid valves and pump motor to purge trapped air from brake actuator unit.',
+    descriptionAr: 'تشغيل صمامات ومضخة نظام ABS إلكترونياً لطرد فقاعات الهواء العالقة داخل وحدة التحكم الهيدروليكية (Actuator).',
+    prerequisitesEn: [
+      'Brake fluid reservoir filled to MAX line.',
+      'Connect clear vinyl hose and container to bleeder screw.',
+      'Ignition ON (Engine OFF), Battery charger connected.'
+    ],
+    prerequisitesAr: [
+      'تعبئة علبة زيت الفرامل إلى علامة الحد الأقصى MAX.',
+      'توصيل خرطوم شفاف ببرغي التنسيم مع وعاء التجميع.',
+      'فتح السويتش ON (المحرك مطفأ)، مع توفير شاحن تغذية للبطارية.'
+    ],
+    requiresSecurityAccess: false
+  },
+  {
     idHex: '0x0110',
     routineId: 0x0110,
-    nameEn: '12V / Hybrid Battery Registration & Reset',
-    nameAr: 'تسجيل وإعادة ضبط البطارية جديدة (Battery Registration)',
+    nameEn: 'Toyota Hybrid HV Battery Control Unit Initialization',
+    nameAr: 'تهيئة وإعادة ضبط كمبيوتر بطارية الهايبرد (HV Battery Initialization)',
     targetEcuAddrHex: '0x7E0',
-    targetEcuName: 'Engine ECM / Battery Smart ECU',
-    descriptionEn: 'Resets battery state of charge (SOC) history and registers new battery capacity.',
-    descriptionAr: 'إعادة تهيئة ذاكرة استهلاك البطارية وتسجيل سعة بطارية جديدة لضبط معدل الشحن.',
+    targetEcuName: 'Engine ECM / HV Battery ECU',
+    descriptionEn: 'Initializes hybrid high-voltage battery SOC tracking algorithm and cell resistance maps after battery cell service.',
+    descriptionAr: 'إعادة تهيئة خوارزميات تتبع مستوى الشحن ومقاومة الخلايا لكومبيوتر بطارية الهايبرد عالية الجهد بعد صيانة الخلايا.',
     prerequisitesEn: [
-      'New 12V or Hybrid auxiliary battery installed.',
+      'HV battery pack serviced or replaced.',
       'Ignition ON, Engine OFF.',
       'Battery voltage > 12.4V.'
     ],
     prerequisitesAr: [
-      'تركيب بطارية جديدة مطابقة للمواصفات.',
+      'إكمال صيانة أو استبدال خلايا بطارية الهايبرد HV.',
       'السويتش في وضع التشغيل IGN ON والمحرك متوقف.',
       'جهد البطارية أكبر من 12.4 فولت.'
     ],
