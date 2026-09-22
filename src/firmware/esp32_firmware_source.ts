@@ -1152,7 +1152,14 @@ void executeIsoTpTransaction(const uint8_t* txBytes, size_t txLen, ActiveTranspo
   isoTp.requestingTransport = transport;
   isoTp.isTx = false;
   isoTp.reqHeaderId = elmConfig.headerId;
-  isoTp.expectedRxId = (elmConfig.headerId == 0x7E0) ? 0x7E8 : (elmConfig.headerId + 8);
+  if (elmConfig.isExtended) {
+    uint32_t base = elmConfig.headerId & 0xFFFF0000;
+    uint8_t target = (elmConfig.headerId >> 8) & 0xFF;
+    uint8_t source = elmConfig.headerId & 0xFF;
+    isoTp.expectedRxId = base | ((uint32_t)source << 8) | target;
+  } else {
+    isoTp.expectedRxId = (elmConfig.headerId == 0x7DF) ? 0x7E8 : (elmConfig.headerId + 8);
+  }
   isoTp.isExtended = elmConfig.isExtended;
   isoTp.totalLen = 0;
   isoTp.currentLen = 0;

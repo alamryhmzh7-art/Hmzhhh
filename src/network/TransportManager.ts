@@ -485,27 +485,19 @@ export class TransportManager {
 
 
         if (!validation.valid) {
+          console.warn(
+            `[TM-CAN-RX] Ignoring mismatched diagnostic response ` +
+            `ID=0x${frameIdNum.toString(16).toUpperCase()} ` +
+            `PAYLOAD=${payloadStart
+              .map(b =>
+                b.toString(16)
+                  .padStart(2, '0')
+                  .toUpperCase()
+              )
+              .join(' ')}`
+          );
 
-          /*
-           * Negative Response 0x7F is valid even though
-           * it does not equal request SID + 0x40.
-           */
-          if (payloadStart[0] !== 0x7F) {
-
-            console.warn(
-              `[TM-CAN-RX] Ignoring mismatched diagnostic response ` +
-              `ID=0x${frameIdNum.toString(16).toUpperCase()} ` +
-              `PAYLOAD=${payloadStart
-                .map(b =>
-                  b.toString(16)
-                    .padStart(2, '0')
-                    .toUpperCase()
-                )
-                .join(' ')}`
-            );
-
-            continue;
-          }
+          continue;
         }
 
 
@@ -1441,7 +1433,7 @@ export class TransportManager {
 
       return data.slice(
         1,
-        1 + Math.min(length, 2)
+        1 + length
       );
     }
 
@@ -1455,7 +1447,7 @@ export class TransportManager {
       }
 
 
-      return data.slice(2, 4);
+      return data.slice(2, Math.min(8, data.length));
     }
 
 
@@ -1473,7 +1465,7 @@ export class TransportManager {
    *   22 F1 90 -> 62 F1 90
    *
    * Negative response:
-   *   7F <SID> <NRC>
+   *   7F <Requested SID> <NRC Code>
    */
   private validateDiagnosticStart(
     requestBytes: number[],
@@ -1496,9 +1488,24 @@ export class TransportManager {
 
 
     /*
-     * Negative response.
+     * Negative response: 0x7F <Requested SID> <NRC>
      */
     if (payloadStart[0] === 0x7F) {
+
+      /*
+       * Ensure the negative response SID matches the requested SID.
+       */
+      if (
+        payloadStart.length >= 2 &&
+        payloadStart[1] !== requestBytes[0]
+      ) {
+
+        return {
+          valid: false,
+          negativeResponse: false
+        };
+      }
+
 
       return {
         valid: true,
@@ -1530,13 +1537,31 @@ export class TransportManager {
 
 
     /*
-     * PID/sub-function validation.
+     * PID / sub-function validation (byte 1).
      */
     if (requestBytes.length >= 2) {
 
       if (
         payloadStart.length < 2 ||
         payloadStart[1] !== requestBytes[1]
+      ) {
+
+        return {
+          valid: false,
+          negativeResponse: false
+        };
+      }
+    }
+
+
+    /*
+     * DID / parameter validation (byte 2).
+     */
+    if (requestBytes.length >= 3) {
+
+      if (
+        payloadStart.length >= 3 &&
+        payloadStart[2] !== requestBytes[2]
       ) {
 
         return {
