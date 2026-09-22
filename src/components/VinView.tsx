@@ -17,6 +17,8 @@ import {
   Hash
 } from 'lucide-react';
 
+import { vinService } from '../services/vinService';
+
 interface VinViewProps {
   status: ConnectionStatus;
   vinInfo: VinInfo;
@@ -35,49 +37,16 @@ export const VinView: React.FC<VinViewProps> = ({ status, vinInfo, setVinInfo, i
     setReadError(null);
     try {
       if (status !== 'CONNECTED' && !isMockMode) {
-        throw new Error('ESP32 NOT CONNECTED');
+        throw new Error(isRtl ? 'محول ESP32 غير متصل بالسيارة' : 'ESP32 ADAPTER NOT CONNECTED');
       }
 
-      // Send Mode 09 PID 02 (VIN request) via transportManager
-      const resp = await transportManager.sendRequest([0x09, 0x02], '0x7DF');
-      
-      if (isMockMode) {
-        const decoded = VinDecoder.decode('4T1BF1FK5NU123456');
-        setVinInfo(decoded);
-        setManualVin(decoded.rawVin);
-        return;
-      }
+      const res = await vinService.readVinFromEcu(isMockMode);
 
-      if (resp.status === 'SUCCESS' && resp.responseRaw) {
-        const bytes = resp.responseRaw.split(' ').map(b => parseInt(b, 16));
-        // Mode 09 PID 02 response format: [0x49, 0x02, 0x01, V1, V2, ... V17]
-        let asciiChars: string[] = [];
-        let startIndex = 0;
-        if (bytes.length >= 20 && bytes[0] === 0x49 && bytes[1] === 0x02) {
-          startIndex = 3;
-        } else if (bytes.length >= 17) {
-          // Find first alphanumeric character
-          startIndex = bytes.findIndex(b => (b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x5A));
-          if (startIndex < 0) startIndex = 0;
-        }
-
-        for (let i = startIndex; i < bytes.length && asciiChars.length < 17; i++) {
-          const b = bytes[i];
-          if ((b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x5A)) {
-            asciiChars.push(String.fromCharCode(b));
-          }
-        }
-
-        const extractedVin = asciiChars.join('');
-        if (extractedVin.length === 17) {
-          const decoded = VinDecoder.decode(extractedVin);
-          setVinInfo(decoded);
-          setManualVin(decoded.rawVin);
-        } else {
-          setReadError(isRtl ? 'لم يتم استلام رقم شاسيه VIN صالح من وحدة التحكم (17 خانة)' : 'Incomplete VIN received from ECU (expected 17 characters)');
-        }
+      if (res.success && res.rawVin) {
+        setVinInfo(res.decoded);
+        setManualVin(res.rawVin);
       } else {
-        setReadError(isRtl ? 'فشل قراءة رقم الشاسيه: لا توجد استجابة من وحدة التحكم (Timeout)' : 'Failed to read VIN: ECU did not respond (Timeout / No Response)');
+        setReadError(isRtl ? (res.errorAr || 'فشل قراءة رقم الشاسيه') : (res.error || 'Failed to read VIN'));
       }
     } catch (err: any) {
       setReadError(err?.message || (isRtl ? 'حدث خطأ أثناء قراءة رقم الشاسيه' : 'Error reading VIN from vehicle'));

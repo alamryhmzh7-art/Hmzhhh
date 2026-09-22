@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import { useI18n } from '../i18n/I18nContext';
 import { ConnectionStatus } from '../types';
-import { UdsService, STANDARD_UDS_SERVICES, NRC_DICTIONARY } from '../uds/udsService';
-import { transportManager } from '../network/TransportManager';
+import { udsService, STANDARD_UDS_SERVICES, UdsResponse } from '../services/udsService';
+import { getNrcInfo, NrcInfo } from '../services/nrc';
 import { 
   Cpu, 
   Send, 
@@ -13,7 +13,9 @@ import {
   ShieldCheck,
   Zap,
   Info,
-  Clock
+  Clock,
+  HelpCircle,
+  RefreshCw
 } from 'lucide-react';
 
 interface UdsViewProps {
@@ -32,16 +34,19 @@ export const UdsView: React.FC<UdsViewProps> = ({ status }) => {
     responseHex: string;
     isPositive: boolean;
     decodedText: string;
+    nrcInfo?: NrcInfo;
   }[]>([]);
   const [isExecuting, setIsExecuting] = useState<boolean>(false);
+  const [pendingNotice, setPendingNotice] = useState<string | null>(null);
 
-  const selectedService = STANDARD_UDS_SERVICES.find(s => s.sid === selectedServiceSid) || STANDARD_UDS_SERVICES[0];
+  const selectedService = (STANDARD_UDS_SERVICES || []).find(s => s.sid === selectedServiceSid) || STANDARD_UDS_SERVICES[0];
 
   const handleExecuteUds = async () => {
     setIsExecuting(true);
+    setPendingNotice(null);
     const now = new Date().toLocaleTimeString();
 
-    const paramBytes = paramHex
+    const paramBytes = (paramHex || '')
       .trim()
       .split(/\s+/)
       .filter(s => s.length > 0)
@@ -51,32 +56,19 @@ export const UdsView: React.FC<UdsViewProps> = ({ status }) => {
     const reqHex = fullRequestBytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
 
     try {
-      const pkt = await transportManager.sendRequest(fullRequestBytes, targetCanId);
-      const resBytes = pkt.responseRaw ? pkt.responseRaw.split(' ').map(h => parseInt(h, 16)) : [];
-      const isPositive = resBytes.length > 0 && resBytes[0] !== 0x7F;
-
-      let decoded = '';
-      if (!isPositive && resBytes.length >= 3) {
-        const nrcHex = resBytes[2].toString(16).padStart(2, '0').toUpperCase();
-        const nrc = UdsService.decodeNrc(nrcHex);
-        decoded = `[NRC 0x${nrcHex}] ${isRtl ? nrc.nameAr : nrc.nameEn}: ${isRtl ? nrc.descriptionAr : nrc.descriptionEn}`;
-      } else {
-        decoded = `Positive Response: Service 0x${selectedServiceSid.toString(16).toUpperCase()} Completed OK`;
-        if (pkt.decodedData) {
-          decoded += ` | Data: "${pkt.decodedData}"`;
-        }
-      }
+      const res: UdsResponse = await udsService.sendUdsRequest(reqHex, targetCanId, 5000);
 
       setUdsConsoleLogs(prev => [
         {
           timestamp: now,
           targetCanId,
           requestHex: reqHex,
-          responseHex: pkt.responseRaw || 'NO RESPONSE',
-          isPositive,
-          decodedText: decoded
+          responseHex: res.rawHex || 'NO RESPONSE',
+          isPositive: res.isPositive,
+          decodedText: isRtl ? res.decodedAr : res.decodedEn,
+          nrcInfo: res.nrcInfo
         },
-        ...prev.slice(0, 40)
+        ...(prev || []).slice(0, 40)
       ]);
     } catch (err: any) {
       setUdsConsoleLogs(prev => [
@@ -88,7 +80,7 @@ export const UdsView: React.FC<UdsViewProps> = ({ status }) => {
           isPositive: false,
           decodedText: err?.message || 'Execution failed'
         },
-        ...prev.slice(0, 40)
+        ...(prev || []).slice(0, 40)
       ]);
     } finally {
       setIsExecuting(false);

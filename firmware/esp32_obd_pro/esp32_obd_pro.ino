@@ -1139,15 +1139,33 @@ void executeIsoTpTransaction(const uint8_t* txBytes, size_t txLen, ActiveTranspo
   isoTp.active = true;
   isoTp.requestingTransport = transport;
   isoTp.isTx = false;
-  isoTp.reqHeaderId = elmConfig.headerId;
+
+  // Header selection logic:
+  // Services 0x01-0x08 -> Functional broadcast (0x7DF or 0x18DB33F1)
+  // Services 0x09+ (e.g. 09 02 VIN), Mode 0A, and UDS (0x10-0x87) -> Physical address (0x7E0 or 0x18DA10F1)
   if (elmConfig.isExtended) {
-    uint32_t base = elmConfig.headerId & 0xFFFF0000;
-    uint8_t target = (elmConfig.headerId >> 8) & 0xFF;
-    uint8_t source = elmConfig.headerId & 0xFF;
+    if (txLen >= 1 && txBytes[0] <= 0x08) {
+      isoTp.reqHeaderId = 0x18DB33F1;
+    } else if (txLen >= 1) {
+      isoTp.reqHeaderId = 0x18DA10F1;
+    } else {
+      isoTp.reqHeaderId = elmConfig.headerId;
+    }
+    uint32_t base = isoTp.reqHeaderId & 0xFFFF0000;
+    uint8_t target = (isoTp.reqHeaderId >> 8) & 0xFF;
+    uint8_t source = isoTp.reqHeaderId & 0xFF;
     isoTp.expectedRxId = base | ((uint32_t)source << 8) | target;
   } else {
-    isoTp.expectedRxId = (elmConfig.headerId == 0x7DF) ? 0x7E8 : (elmConfig.headerId + 8);
+    if (txLen >= 1 && txBytes[0] <= 0x08) {
+      isoTp.reqHeaderId = 0x7DF;
+    } else if (txLen >= 1) {
+      isoTp.reqHeaderId = (elmConfig.headerId == 0x7DF) ? 0x7E0 : elmConfig.headerId;
+    } else {
+      isoTp.reqHeaderId = elmConfig.headerId;
+    }
+    isoTp.expectedRxId = (isoTp.reqHeaderId == 0x7DF) ? 0x7E8 : (isoTp.reqHeaderId + 8);
   }
+
   isoTp.isExtended = elmConfig.isExtended;
   isoTp.totalLen = 0;
   isoTp.currentLen = 0;
@@ -1156,7 +1174,13 @@ void executeIsoTpTransaction(const uint8_t* txBytes, size_t txLen, ActiveTranspo
   isoTp.errorMsg = NULL;
   isoTp.fcWaitCount = 0;
   isoTp.startTime = millis();
-  isoTp.timeoutMs = elmConfig.timeoutMs;
+
+  // UDS Service Timeout (5000ms for ISO 14229 services 0x10 - 0x87)
+  if (txLen >= 1 && txBytes[0] >= 0x10 && txBytes[0] <= 0x87) {
+    isoTp.timeoutMs = 5000;
+  } else {
+    isoTp.timeoutMs = elmConfig.timeoutMs;
+  }
 
   if (txLen <= 7) {
     // Single Frame (SF)
