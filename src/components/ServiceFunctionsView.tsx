@@ -3,6 +3,12 @@ import { useI18n } from '../i18n/I18nContext';
 import { ServiceFunctionItem, ConnectionStatus } from '../types';
 import { SERVICE_FUNCTIONS_CATALOG } from '../services/serviceFunctions';
 import { transportManager } from '../network/TransportManager';
+import { 
+  toyotaService, 
+  TOYOTA_ABS_PROFILES, 
+  ToyotaAbsEcuProfile, 
+  ZeroPointCalibrationResult 
+} from '../services/toyotaService';
 import { AppLogger } from '../logging/logger';
 import { 
   Wrench, 
@@ -17,7 +23,10 @@ import {
   Layers, 
   Info,
   X,
-  RefreshCw
+  RefreshCw,
+  FileCode,
+  Copy,
+  Check
 } from 'lucide-react';
 
 interface ServiceFunctionsViewProps {
@@ -28,11 +37,16 @@ interface ServiceFunctionsViewProps {
 export const ServiceFunctionsView: React.FC<ServiceFunctionsViewProps> = ({ status, batteryVoltage }) => {
   const { t, isRtl } = useI18n();
   const [selectedFunc, setSelectedFunc] = useState<ServiceFunctionItem>(SERVICE_FUNCTIONS_CATALOG[0]);
+  const [selectedAbsProfile, setSelectedAbsProfile] = useState<ToyotaAbsEcuProfile>(TOYOTA_ABS_PROFILES[0]);
+  const [zpcResult, setZpcResult] = useState<ZeroPointCalibrationResult | null>(null);
   const [showWarningModal, setShowWarningModal] = useState<boolean>(false);
+  const [showRawLogModal, setShowRawLogModal] = useState<boolean>(false);
+  const [copyLogSuccess, setCopyLogSuccess] = useState<boolean>(false);
   const [isExecuting, setIsExecuting] = useState<boolean>(false);
   const [currentStepIndex, setCurrentStepIndex] = useState<number>(0);
   const [executionLog, setExecutionLog] = useState<{ step: string; status: 'DONE' | 'RUNNING' | 'PENDING' }[]>([]);
   const [isCompleted, setIsCompleted] = useState<boolean>(false);
+  const [executionError, setExecutionError] = useState<string | null>(null);
 
   // Safety checks
   const voltageOk = batteryVoltage > 0 ? batteryVoltage >= (selectedFunc.requiredConditions?.minVoltage || 12.0) : true;
@@ -45,7 +59,29 @@ export const ServiceFunctionsView: React.FC<ServiceFunctionsViewProps> = ({ stat
     setShowWarningModal(false);
     setIsExecuting(true);
     setIsCompleted(false);
+    setExecutionError(null);
+    setZpcResult(null);
 
+    // Dedicated Real Zero Point Calibration Flow
+    if (selectedFunc.id === 'toyota_vsc_zero_point') {
+      try {
+        console.log(`[SERVICE-VIEW] Executing Real Toyota Zero Point Calibration with profile:`, selectedAbsProfile);
+        const result = await toyotaService.performZeroPointCalibration(selectedAbsProfile);
+        setZpcResult(result);
+        setIsCompleted(result.success);
+        if (!result.success) {
+          setExecutionError(isRtl ? result.outcomeMessageAr : result.outcomeMessageEn);
+        }
+      } catch (err: any) {
+        console.error(`[SERVICE-VIEW] Zero Point Calibration error:`, err);
+        setExecutionError(err?.message || 'Calibration Execution Error');
+      } finally {
+        setIsExecuting(false);
+      }
+      return;
+    }
+
+    // Generic Routine Execution Flow
     const steps = isRtl ? selectedFunc.stepsAr : selectedFunc.stepsEn;
     setExecutionLog(steps.map((s, idx) => ({ step: s, status: idx === 0 ? 'RUNNING' : 'PENDING' })));
 
@@ -53,9 +89,9 @@ export const ServiceFunctionsView: React.FC<ServiceFunctionsViewProps> = ({ stat
       if (!transportManager.isConnected()) {
         throw new Error(isRtl ? 'غير متصل بمحول السيارة (ESP32). يرجى الاتصال عبر Wi-Fi أو Bluetooth أولاً.' : 'Not connected to vehicle adapter (ESP32). Please connect via Wi-Fi or Bluetooth first.');
       }
-      // Step 0: Ensure Extended Diagnostic Session (0x10 0x03) is opened
-      console.log(`[SERVICE-FUNC] Initializing Extended Diagnostic Session (10 03)...`);
-      await transportManager.sendRequest([0x10, 0x03], '0x7E0');
+
+      console.log(`[SERVICE-FUNC] Initializing Extended Diagnostic Session (10 03) on ${selectedFunc.targetEcuAddress}...`);
+      await transportManager.sendRequest([0x10, 0x03], selectedFunc.targetEcuAddress);
       await new Promise(r => setTimeout(r, 300));
 
       for (let i = 0; i < steps.length; i++) {
@@ -76,7 +112,7 @@ export const ServiceFunctionsView: React.FC<ServiceFunctionsViewProps> = ({ stat
 
         while (attempts < 3 && !success) {
           attempts++;
-          const resp = await transportManager.sendRequest(reqPayload, '0x7E0');
+          const resp = await transportManager.sendRequest(reqPayload, selectedFunc.targetEcuAddress);
           
           if (resp.status === 'SUCCESS' || resp.status === 'NRC') {
             const respBytes = resp.responseRaw ? resp.responseRaw.split(' ').map(h => parseInt(h, 16)) : [];
@@ -102,7 +138,7 @@ export const ServiceFunctionsView: React.FC<ServiceFunctionsViewProps> = ({ stat
           throw new Error('ECU Timeout / Max Response Pending attempts reached');
         }
 
-        await new Promise(r => setTimeout(r, 1500));
+        await new Promise(r => setTimeout(r, 1200));
       }
 
       setExecutionLog(prev => prev.map(item => ({ ...item, status: 'DONE' })));
@@ -110,6 +146,7 @@ export const ServiceFunctionsView: React.FC<ServiceFunctionsViewProps> = ({ stat
     } catch (err: any) {
       console.error(`[SERVICE-FUNC] Execution Failed:`, err);
       const errMsg = err?.message || 'Routine execution failed';
+      setExecutionError(errMsg);
       AppLogger.error(
         'OBD',
         'SERVICE_ROUTINE_FAIL',
@@ -120,6 +157,14 @@ export const ServiceFunctionsView: React.FC<ServiceFunctionsViewProps> = ({ stat
       );
     } finally {
       setIsExecuting(false);
+    }
+  };
+
+  const copyRawLogToClipboard = () => {
+    if (zpcResult?.rawLogsText) {
+      navigator.clipboard.writeText(zpcResult.rawLogsText);
+      setCopyLogSuccess(true);
+      setTimeout(() => setCopyLogSuccess(false), 2000);
     }
   };
 
@@ -187,16 +232,50 @@ export const ServiceFunctionsView: React.FC<ServiceFunctionsViewProps> = ({ stat
         <div className="lg:col-span-2 space-y-5">
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4 shadow-lg">
             {/* Title */}
-            <div className="pb-3 border-b border-slate-800">
-              <span className="text-xs font-mono text-amber-400 font-bold">
-                ROUTINE IDENTIFIER: {selectedFunc.routineIdHex} | TARGET: {selectedFunc.ecuTarget}
-              </span>
+            <div className="pb-3 border-b border-slate-800 space-y-2">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <span className="text-xs font-mono text-amber-400 font-bold">
+                  ROUTINE IDENTIFIER: {selectedFunc.routineIdHex} | TARGET: {selectedFunc.id === 'toyota_vsc_zero_point' ? selectedAbsProfile.txCanId : selectedFunc.ecuTarget}
+                </span>
+                {selectedFunc.id === 'toyota_vsc_zero_point' && (
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-950 text-blue-400 border border-blue-800 font-bold">
+                    CAN {selectedAbsProfile.canType} ({selectedAbsProfile.txCanId} {'->'} {selectedAbsProfile.rxCanId})
+                  </span>
+                )}
+              </div>
+
               <h3 className="text-lg font-bold text-white mt-1">
                 {isRtl ? selectedFunc.titleAr : selectedFunc.titleEn}
               </h3>
               <p className="text-xs text-slate-400 mt-1">
                 {isRtl ? selectedFunc.descriptionAr : selectedFunc.descriptionEn}
               </p>
+
+              {/* ABS ECU Specific Profile Selector for Toyota Zero Point Calibration */}
+              {selectedFunc.id === 'toyota_vsc_zero_point' && (
+                <div className="bg-slate-800/80 border border-slate-700 rounded-xl p-3 mt-3 space-y-1.5">
+                  <label className="text-xs font-bold text-amber-400 block">
+                    {isRtl ? 'اختر نوع كومبيوتر فرامل ABS/VSC الخاص بسيارتك:' : 'Select Toyota ABS / VSC Skid Control ECU Profile:'}
+                  </label>
+                  <select
+                    value={selectedAbsProfile.id}
+                    onChange={(e) => {
+                      const found = TOYOTA_ABS_PROFILES.find(p => p.id === e.target.value);
+                      if (found) setSelectedAbsProfile(found);
+                    }}
+                    className="w-full bg-slate-900 border border-slate-700 text-white text-xs rounded-lg p-2.5 font-mono focus:border-amber-500 outline-none"
+                  >
+                    {TOYOTA_ABS_PROFILES.map((prof) => (
+                      <option key={prof.id} value={prof.id}>
+                        {isRtl ? prof.generationNameAr : prof.generationNameEn} [TX: {prof.txCanId} / RX: {prof.rxCanId} - Routine: {prof.routineIdHex}]
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    {isRtl ? selectedAbsProfile.descriptionAr : selectedAbsProfile.descriptionEn}
+                  </p>
+                </div>
+              )}
             </div>
 
             {/* Safety Interlocks Checklist */}
@@ -277,23 +356,92 @@ export const ServiceFunctionsView: React.FC<ServiceFunctionsViewProps> = ({ stat
               </div>
             </div>
 
-            {/* Completion Banner */}
+            {/* Zero Point Calibration Audit Steps Breakdown (if available) */}
+            {zpcResult && (
+              <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <FileCode className="h-4 w-4" />
+                    <span>Real Zero Point Calibration Audit Trace</span>
+                  </h4>
+                  <button
+                    onClick={() => setShowRawLogModal(true)}
+                    className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-mono font-bold flex items-center gap-1.5 border border-slate-700 transition-colors"
+                  >
+                    <FileCode className="h-3.5 w-3.5 text-amber-400" />
+                    <span>{isRtl ? 'عرض سجل TX/RX الخام' : 'View Raw TX/RX Audit Log'}</span>
+                  </button>
+                </div>
+
+                <div className="space-y-1.5 font-mono text-[11px]">
+                  {zpcResult.stepsAudit.map((step) => (
+                    <div
+                      key={step.stepIndex}
+                      className={`p-2 rounded border flex flex-col sm:flex-row sm:items-center justify-between gap-1 ${
+                        step.success
+                          ? 'bg-emerald-950/20 border-emerald-800/40 text-emerald-300'
+                          : 'bg-rose-950/20 border-rose-800/40 text-rose-300'
+                      }`}
+                    >
+                      <div>
+                        <span className="font-bold mr-2 text-slate-300">[STEP {step.stepIndex}] {isRtl ? step.nameAr : step.nameEn}</span>
+                        <div className="text-[10px] text-slate-400">
+                          TX: <code className="text-amber-300">{step.requestRawHex}</code> | RX: <code className="text-emerald-300">{step.responseRawHex}</code>
+                        </div>
+                      </div>
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded self-start sm:self-auto ${step.success ? 'bg-emerald-950 text-emerald-400' : 'bg-rose-950 text-rose-400'}`}>
+                        {step.success ? 'PASS' : 'FAIL'} ({step.durationMs}ms)
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Error / Failure Banner */}
+            {executionError && (
+              <div className="bg-rose-500/10 border border-rose-500/40 rounded-xl p-4 flex items-start gap-3 text-rose-300">
+                <AlertTriangle className="h-6 w-6 shrink-0 text-rose-400 mt-0.5" />
+                <div className="space-y-1">
+                  <h4 className="font-bold text-sm text-rose-400">
+                    {isRtl ? 'فشل تنفيذ المعايرة من كمبيوتر الفرامل' : 'Calibration Execution Failed / Rejected'}
+                  </h4>
+                  <p className="text-xs">{executionError}</p>
+                </div>
+              </div>
+            )}
+
+            {/* Success Completion Banner */}
             {isCompleted && (
               <div className="bg-emerald-500/10 border border-emerald-500/40 rounded-xl p-4 flex items-center gap-3 text-emerald-400">
                 <CheckCircle2 className="h-6 w-6 shrink-0" />
                 <div>
-                  <h4 className="font-bold text-sm">Service Function Completed Successfully</h4>
-                  <p className="text-xs text-slate-300">ECU positive response acknowledged. Adaptation values written to non-volatile memory.</p>
+                  <h4 className="font-bold text-sm">
+                    {isRtl ? 'تمت معايرة نقطة الصفر للفرامل وحساس الجاذبية بنجاح' : 'Zero Point Calibration Completed Successfully'}
+                  </h4>
+                  <p className="text-xs text-slate-300">
+                    {zpcResult ? (isRtl ? zpcResult.outcomeMessageAr : zpcResult.outcomeMessageEn) : 'ECU positive response acknowledged. Calibration parameters saved in Skid Control EEPROM.'}
+                  </p>
                 </div>
               </div>
             )}
 
             {/* Execute Button */}
-            <div className="pt-2 flex justify-end">
+            <div className="pt-2 flex items-center justify-between gap-3 flex-wrap">
+              {zpcResult?.rawLogsText && (
+                <button
+                  onClick={() => setShowRawLogModal(true)}
+                  className="px-4 py-2.5 rounded-xl text-xs font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 flex items-center gap-2 border border-slate-700 transition-colors"
+                >
+                  <FileCode className="h-4 w-4 text-amber-400" />
+                  <span>{isRtl ? 'عرض سجل TX/RX الخام' : 'View Raw TX/RX Audit Log'}</span>
+                </button>
+              )}
+
               <button
                 onClick={handleStartRoutine}
                 disabled={isExecuting}
-                className="px-6 py-3 rounded-xl text-xs font-bold bg-amber-600 hover:bg-amber-500 text-white flex items-center gap-2 shadow-lg shadow-amber-950/60 transition-all disabled:opacity-50"
+                className="px-6 py-3 rounded-xl text-xs font-bold bg-amber-600 hover:bg-amber-500 text-white flex items-center gap-2 shadow-lg shadow-amber-950/60 transition-all disabled:opacity-50 ml-auto"
               >
                 {isExecuting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
                 <span>{isExecuting ? 'Executing Routine...' : 'Start Calibration Routine'}</span>
@@ -302,6 +450,49 @@ export const ServiceFunctionsView: React.FC<ServiceFunctionsViewProps> = ({ stat
           </div>
         </div>
       </div>
+
+      {/* Raw Log Audit Viewer Modal */}
+      {showRawLogModal && zpcResult && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-2xl w-full p-6 shadow-2xl space-y-4 max-h-[85vh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3 shrink-0">
+              <div className="flex items-center gap-2 text-amber-400">
+                <FileCode className="h-5 w-5" />
+                <h3 className="font-bold text-base text-white">
+                  {isRtl ? 'سجل طلبات واستجابات CAN الخام (Raw TX/RX Log)' : 'Toyota ABS Zero Point Calibration Raw Audit Log'}
+                </h3>
+              </div>
+              <button
+                onClick={() => setShowRawLogModal(false)}
+                className="text-slate-400 hover:text-white"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto bg-slate-950 p-4 rounded-xl border border-slate-800 font-mono text-xs text-slate-300 leading-relaxed whitespace-pre-wrap select-all">
+              {zpcResult.rawLogsText}
+            </div>
+
+            <div className="flex items-center justify-between pt-2 border-t border-slate-800 shrink-0">
+              <button
+                onClick={copyRawLogToClipboard}
+                className="px-4 py-2 rounded-lg text-xs font-bold bg-amber-600 hover:bg-amber-500 text-white flex items-center gap-2"
+              >
+                {copyLogSuccess ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                <span>{copyLogSuccess ? (isRtl ? 'تم النسخ!' : 'Copied!') : (isRtl ? 'نسخ السجل للحافظة' : 'Copy Log')}</span>
+              </button>
+
+              <button
+                onClick={() => setShowRawLogModal(false)}
+                className="px-4 py-2 rounded-lg text-xs font-bold bg-slate-800 hover:bg-slate-700 text-slate-300"
+              >
+                {t('btnClose')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Safety Warning Confirmation Modal */}
       {showWarningModal && (

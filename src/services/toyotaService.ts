@@ -242,7 +242,355 @@ export interface ToyotaRoutineExecutionResult {
   errorAr?: string;
 }
 
+export interface ToyotaAbsEcuProfile {
+  id: string;
+  generationNameEn: string;
+  generationNameAr: string;
+  canType: '11-bit' | '29-bit';
+  txCanId: string;
+  rxCanId: string;
+  routineIdHex: string;
+  routineId: number;
+  descriptionEn: string;
+  descriptionAr: string;
+}
+
+export const TOYOTA_ABS_PROFILES: ToyotaAbsEcuProfile[] = [
+  {
+    id: 'abs_std_11bit',
+    generationNameEn: 'Toyota Standard Skid Control / ABS ECU (0x7B0 / 0x7B8)',
+    generationNameAr: 'تويوتا القياسي فرامل VSC / ABS (عنوان 0x7B0)',
+    canType: '11-bit',
+    txCanId: '0x7B0',
+    rxCanId: '0x7B8',
+    routineIdHex: '0x0211',
+    routineId: 0x0211,
+    descriptionEn: 'Standard Skid Control ECU Zero Point Calibration Routine 0x0211',
+    descriptionAr: 'كومبيوتر فرامل الثبات والمانع للانزلاق ABS/VSC (عنوان 0x7B0) - روتين 0x0211'
+  },
+  {
+    id: 'abs_alt_11bit',
+    generationNameEn: 'Toyota ABS / VSC Alternate Address (0x7E2 / 0x7EA)',
+    generationNameAr: 'تويوتا فرامل VSC / ABS - عنوان بديل (0x7E2)',
+    canType: '11-bit',
+    txCanId: '0x7E2',
+    rxCanId: '0x7EA',
+    routineIdHex: '0x0211',
+    routineId: 0x0211,
+    descriptionEn: 'Skid Control ECU Alternate Diagnostic Address (0x7E2)',
+    descriptionAr: 'كومبيوتر فرامل الثبات ABS/VSC - عنوان التشخيص البديل 0x7E2'
+  },
+  {
+    id: 'abs_tnga_29bit',
+    generationNameEn: 'Toyota Modern Hybrid / TNGA ABS ECU (29-bit CAN 0x18DA28F1)',
+    generationNameAr: 'تويوتا الحديثة والهايبرد TNGA فرامل VSC (بروتوكول 29-bit)',
+    canType: '29-bit',
+    txCanId: '0x18DA28F1',
+    rxCanId: '0x18DAF128',
+    routineIdHex: '0x0211',
+    routineId: 0x0211,
+    descriptionEn: 'Skid Control ECU 29-bit ISO-TP address (0x18DA28F1)',
+    descriptionAr: 'كومبيوتر فرامل الثبات بالسيارات الحديثة والهايبرد (عنوان 29-bit)'
+  },
+  {
+    id: 'abs_legacy_0201',
+    generationNameEn: 'Toyota ABS / VSC Sensor Reset Legacy Routine (0x0201)',
+    generationNameAr: 'تويوتا فرامل VSC / ABS - روتين المعايرة التقليدي (0x0201)',
+    canType: '11-bit',
+    txCanId: '0x7B0',
+    rxCanId: '0x7B8',
+    routineIdHex: '0x0201',
+    routineId: 0x0201,
+    descriptionEn: 'Legacy Toyota Yaw-Rate & Acceleration Zero Point Reset (0x0201)',
+    descriptionAr: 'روتين صفرية حساس التسارع والياو للأجيال السابقة (0x0201)'
+  }
+];
+
+export interface ZeroPointCalibrationStepAudit {
+  stepIndex: number;
+  nameEn: string;
+  nameAr: string;
+  txCanId: string;
+  requestRawHex: string;
+  responseRawHex: string;
+  durationMs: number;
+  success: boolean;
+  statusTextEn: string;
+  statusTextAr: string;
+  nrcInfo?: NrcInfo;
+}
+
+export interface ZeroPointCalibrationResult {
+  success: boolean;
+  ecuTxCanId: string;
+  ecuRxCanId: string;
+  routineIdHex: string;
+  dtcCheckPassed: boolean;
+  activeDtcsFound: string[];
+  securityAccessRequired: boolean;
+  stepsAudit: ZeroPointCalibrationStepAudit[];
+  outcomeMessageEn: string;
+  outcomeMessageAr: string;
+  rawLogsText: string;
+}
+
 export class ToyotaService {
+  /**
+   * Executes real Toyota Zero Point Calibration for ABS / VSC / Yaw Rate & Acceleration Sensor.
+   * Targets the Skid Control ECU directly.
+   */
+  public async performZeroPointCalibration(
+    profile: ToyotaAbsEcuProfile = TOYOTA_ABS_PROFILES[0]
+  ): Promise<ZeroPointCalibrationResult> {
+    const stepsAudit: ZeroPointCalibrationStepAudit[] = [];
+    const activeDtcsFound: string[] = [];
+    let securityAccessRequired = false;
+    let dtcCheckPassed = true;
+    const startTime = performance.now();
+
+    const addAudit = (
+      stepIndex: number,
+      nameEn: string,
+      nameAr: string,
+      txCanId: string,
+      requestRawHex: string,
+      responseRawHex: string,
+      durationMs: number,
+      success: boolean,
+      statusTextEn: string,
+      statusTextAr: string,
+      nrcInfo?: NrcInfo
+    ) => {
+      stepsAudit.push({
+        stepIndex,
+        nameEn,
+        nameAr,
+        txCanId,
+        requestRawHex,
+        responseRawHex,
+        durationMs,
+        success,
+        statusTextEn,
+        statusTextAr,
+        nrcInfo
+      });
+    };
+
+    // 1. Connection Check
+    if (!transportManager.isConnected()) {
+      addAudit(1, 'Hardware Transport Connection Check', 'فحص الاتصال بمحول العتاد', profile.txCanId, 'N/A', 'N/A', 0, false, 'Not connected to ESP32 adapter', 'غير متصل بمحول السيارة');
+      return {
+        success: false,
+        ecuTxCanId: profile.txCanId,
+        ecuRxCanId: profile.rxCanId,
+        routineIdHex: profile.routineIdHex,
+        dtcCheckPassed: false,
+        activeDtcsFound: [],
+        securityAccessRequired: false,
+        stepsAudit,
+        outcomeMessageEn: 'Failed: Hardware transport (ESP32) is not connected.',
+        outcomeMessageAr: 'فشل المعايرة: محول العتاد (ESP32) غير متصل.',
+        rawLogsText: '=== ZERO POINT CALIBRATION AUDIT LOG ===\nFAILED: Hardware adapter disconnected.\n'
+      };
+    }
+
+    addAudit(1, 'Hardware Transport Connection Check', 'فحص الاتصال بمحول العتاد', profile.txCanId, 'N/A', 'CONNECTED', 5, true, 'Hardware transport active', 'وسيط الاتصال متصل');
+
+    // 2. Read DTCs from Skid Control ECU (UDS 0x19 0x02 0x08)
+    const dtcStepStart = performance.now();
+    try {
+      const dtcResp = await transportManager.sendRequest([0x19, 0x02, 0x08], profile.txCanId);
+      const dtcDur = Math.round(performance.now() - dtcStepStart);
+
+      if (dtcResp && (dtcResp.status === 'SUCCESS' || dtcResp.status === 'NRC') && dtcResp.responseRaw) {
+        const tokens = dtcResp.responseRaw.trim().split(/\s+/).filter(Boolean);
+        const bytes = tokens.map(h => parseInt(h, 16)).filter(n => !isNaN(n));
+
+        if (bytes[0] === 0x59) {
+          // Parse DTCs (each DTC is 4 bytes: High, Mid, Low, Status)
+          const dtcData = bytes.slice(3);
+          for (let i = 0; i < dtcData.length; i += 4) {
+            if (i + 3 < dtcData.length) {
+              const high = dtcData[i];
+              const mid = dtcData[i + 1];
+              const statusByte = dtcData[i + 3];
+              // Active DTC bitmask check (0x01 = testFailed, 0x08 = confirmedDTC)
+              if ((statusByte & 0x09) !== 0) {
+                const prefix = (high & 0xC0) === 0x00 ? 'P' : (high & 0xC0) === 0x40 ? 'C' : (high & 0xC0) === 0x80 ? 'B' : 'U';
+                const codeHex = prefix + ((high & 0x3F).toString(16).padStart(2, '0') + mid.toString(16).padStart(2, '0')).toUpperCase();
+                activeDtcsFound.push(codeHex);
+              }
+            }
+          }
+
+          if (activeDtcsFound.length > 0) {
+            dtcCheckPassed = false;
+            addAudit(2, 'Skid Control ECU DTC Pre-Check', 'قراءة أعطال كمبيوتر الفرامل (DTCs)', profile.txCanId, '19 02 08', dtcResp.responseRaw, dtcDur, true, `Active ABS DTCs Found: ${activeDtcsFound.join(', ')}`, `تم العثور على أعطال نشطة في نظام الفرامل: ${activeDtcsFound.join(', ')}`);
+          } else {
+            addAudit(2, 'Skid Control ECU DTC Pre-Check', 'قراءة أعطال كمبيوتر الفرامل (DTCs)', profile.txCanId, '19 02 08', dtcResp.responseRaw, dtcDur, true, 'No active ABS DTCs detected', 'لا توجد أعطال نشطة في نظام الفرامل');
+          }
+        } else {
+          addAudit(2, 'Skid Control ECU DTC Pre-Check', 'قراءة أعطال كمبيوتر الفرامل (DTCs)', profile.txCanId, '19 02 08', dtcResp.responseRaw, dtcDur, true, 'ECU response received', 'تمت استجابة كمبيوتر الفرامل');
+        }
+      } else {
+        addAudit(2, 'Skid Control ECU DTC Pre-Check', 'قراءة أعطال كمبيوتر الفرامل (DTCs)', profile.txCanId, '19 02 08', dtcResp.error || 'TIMEOUT', dtcDur, false, 'No DTC response from Skid Control ECU', 'لم يستجب كمبيوتر الفرامل لقراءة الأعطال');
+      }
+    } catch (e: any) {
+      addAudit(2, 'Skid Control ECU DTC Pre-Check', 'قراءة أعطال كمبيوتر الفرامل (DTCs)', profile.txCanId, '19 02 08', e?.message || 'ERR', 0, false, 'Error reading DTCs', 'خطأ أثناء قراءة الأعطال');
+    }
+
+    // 3. Extended Session (0x10 0x03) on Skid Control ECU
+    const sessionStart = performance.now();
+    try {
+      const sessResp = await transportManager.sendRequest([0x10, 0x03], profile.txCanId);
+      const sessDur = Math.round(performance.now() - sessionStart);
+
+      if (sessResp && sessResp.status === 'SUCCESS' && sessResp.responseRaw) {
+        addAudit(3, 'Extended Session Start (0x10 0x03)', 'فتح الجلسة التشخيصية الممتدة (10 03)', profile.txCanId, '10 03', sessResp.responseRaw, sessDur, true, 'Extended Session Opened', 'تم فتح الجلسة الممتدة بنجاح');
+      } else {
+        const respBytes = sessResp.responseRaw ? sessResp.responseRaw.split(' ').map(h => parseInt(h, 16)) : [];
+        let nrcInfo: NrcInfo | undefined = undefined;
+        if (respBytes[0] === 0x7F) {
+          nrcInfo = getNrcInfo(respBytes[2] || 0x10);
+        }
+        addAudit(3, 'Extended Session Start (0x10 0x03)', 'فتح الجلسة التشخيصية الممتدة (10 03)', profile.txCanId, '10 03', sessResp.responseRaw || 'NO_RESPONSE', sessDur, false, nrcInfo ? nrcInfo.descEn : 'Session start rejected', nrcInfo ? nrcInfo.descAr : 'رفض كمبيوتر الفرامل فتح الجلسة', nrcInfo);
+      }
+    } catch (e: any) {
+      addAudit(3, 'Extended Session Start (0x10 0x03)', 'فتح الجلسة التشخيصية الممتدة (10 03)', profile.txCanId, '10 03', e?.message || 'ERR', 0, false, 'Extended session request error', 'خطأ في طلب فتح الجلسة الممتدة');
+    }
+
+    // 4. Control DTC Setting OFF (0x85 0x02)
+    const dtcOffStart = performance.now();
+    try {
+      const dtcOffResp = await transportManager.sendRequest([0x85, 0x02], profile.txCanId);
+      const dtcOffDur = Math.round(performance.now() - dtcOffStart);
+      addAudit(4, 'Disable DTC Setting (0x85 0x02)', 'إيقاف تسجيل الأعطال مؤقتاً (85 02)', profile.txCanId, '85 02', dtcOffResp.responseRaw || 'OK', dtcOffDur, true, 'DTC storage suspended for calibration', 'تم إيقاف تسجيل الأعطال مؤقتاً أثناء المعايرة');
+    } catch (e) {
+      // Non-fatal
+    }
+
+    // 5. Execute Routine Control 0x31 0x01 <RoutineID>
+    const routineIdHigh = (profile.routineId >> 8) & 0xFF;
+    const routineIdLow = profile.routineId & 0xFF;
+    const routineReqBytes = [0x31, 0x01, routineIdHigh, routineIdLow];
+    const routineReqHex = routineReqBytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+
+    const routineStart = performance.now();
+    let routineSuccess = false;
+    let finalOutcomeEn = '';
+    let finalOutcomeAr = '';
+    let routineResponseRawHex = '';
+    let mainNrcInfo: NrcInfo | undefined = undefined;
+
+    try {
+      let attempts = 0;
+      let pending0x78Count = 0;
+
+      while (attempts < 6 && !routineSuccess) {
+        attempts++;
+        const reqPayload = attempts === 1 ? routineReqBytes : [0x31, 0x03, routineIdHigh, routineIdLow];
+        const reqHex = reqPayload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+
+        console.log(`[TOYOTA-ABS-CALIBRATION] Step 5 Attempt ${attempts}: TX=${reqHex} Target=${profile.txCanId}`);
+        const resp = await transportManager.sendRequest(reqPayload, profile.txCanId);
+        const dur = Math.round(performance.now() - routineStart);
+
+        if (resp && (resp.status === 'SUCCESS' || resp.status === 'NRC') && resp.responseRaw) {
+          routineResponseRawHex = resp.responseRaw;
+          const tokens = resp.responseRaw.trim().split(/\s+/).filter(Boolean);
+          const bytes = tokens.map(h => parseInt(h, 16)).filter(n => !isNaN(n));
+
+          if (bytes[0] === 0x71) {
+            // POSITIVE RESPONSE!
+            routineSuccess = true;
+            finalOutcomeEn = `Zero Point Calibration Routine (${profile.routineIdHex}) Executed Successfully! Positive ECU Response [${resp.responseRaw}]. Sensor neutral points updated in Skid Control EEPROM.`;
+            finalOutcomeAr = `تمت معايرة نقطة الصفر للفرامل وحساس الجاذبية والتسارع (${profile.routineIdHex}) بنجاح! استجابة إيجابية من العقل [${resp.responseRaw}].`;
+            addAudit(5, `Execute Routine Control (${profile.routineIdHex})`, `تنفيذ روتين معايرة نقطة الصفر (${profile.routineIdHex})`, profile.txCanId, reqHex, resp.responseRaw, dur, true, finalOutcomeEn, finalOutcomeAr);
+            break;
+          } else if (bytes[0] === 0x7F) {
+            const nrcCode = bytes.length > 2 ? bytes[2] : 0x10;
+            mainNrcInfo = getNrcInfo(nrcCode);
+
+            if (nrcCode === 0x78) {
+              // 0x78 Response Pending
+              pending0x78Count++;
+              console.log(`[TOYOTA-ABS-CALIBRATION] ECU returned NRC 0x78 (Response Pending). Count=${pending0x78Count}. Waiting 2000ms...`);
+              addAudit(5, `Routine Control Pending (0x78)`, `روتين المعايرة قيد المعالجة (NRC 0x78)`, profile.txCanId, reqHex, resp.responseRaw, dur, false, `ECU requested processing time (0x78 Response Pending). Poll ${pending0x78Count}...`, `العقل طلب وقتاً لإكمال المعايرة (0x78). جاري الانتظار...`, mainNrcInfo);
+              await new Promise(r => setTimeout(r, 2000));
+              continue;
+            } else if (nrcCode === 0x33) {
+              securityAccessRequired = true;
+              finalOutcomeEn = `Calibration Rejected: Security Access Required (NRC 0x33). The Skid Control ECU requires Security Access unlocking before Zero Point Calibration can proceed.`;
+              finalOutcomeAr = `تم رفض المعايرة: كمبيوتر الفرامل يتطلب فتح صلاحية الأمان (Security Access NRC 0x33) قبل إجراء معايرة نقطة الصفر.`;
+              addAudit(5, `Execute Routine Control (${profile.routineIdHex})`, `تنفيذ روتين معايرة نقطة الصفر (${profile.routineIdHex})`, profile.txCanId, reqHex, resp.responseRaw, dur, false, finalOutcomeEn, finalOutcomeAr, mainNrcInfo);
+              break;
+            } else if (nrcCode === 0x22) {
+              finalOutcomeEn = `Calibration Rejected: Conditions Not Correct (NRC 0x22). Pre-conditions violated: Park vehicle on flat level ground, keep steering wheel straight, shift gear to P, and keep vehicle completely stationary.`;
+              finalOutcomeAr = `تم رفض المعايرة: الشروط غير مكتملة (NRC 0x22). يرجى التأكد من توقف السيارة تماماً على أرض مستوية، جعل عجلة القيادة مستقيمة، ووضع القير في P.`;
+              addAudit(5, `Execute Routine Control (${profile.routineIdHex})`, `تنفيذ روتين معايرة نقطة الصفر (${profile.routineIdHex})`, profile.txCanId, reqHex, resp.responseRaw, dur, false, finalOutcomeEn, finalOutcomeAr, mainNrcInfo);
+              break;
+            } else {
+              finalOutcomeEn = `Calibration Rejected by Skid Control ECU: NRC 0x${nrcCode.toString(16).toUpperCase()} (${mainNrcInfo.nameEn} - ${mainNrcInfo.descEn})`;
+              finalOutcomeAr = `تم رفض المعايرة من كمبيوتر الفرامل: رمز الخطأ NRC 0x${nrcCode.toString(16).toUpperCase()} (${mainNrcInfo.nameAr} - ${mainNrcInfo.descAr})`;
+              addAudit(5, `Execute Routine Control (${profile.routineIdHex})`, `تنفيذ روتين معايرة نقطة الصفر (${profile.routineIdHex})`, profile.txCanId, reqHex, resp.responseRaw, dur, false, finalOutcomeEn, finalOutcomeAr, mainNrcInfo);
+              break;
+            }
+          }
+        } else {
+          finalOutcomeEn = `No response from Skid Control ECU (${resp?.error || 'TIMEOUT'}). Target CAN ID: ${profile.txCanId}`;
+          finalOutcomeAr = `لم يصل أي رد من كمبيوتر فرامل ABS/VSC (${resp?.error || 'انتهت المهلة'}). عنوان CAN المستهدف: ${profile.txCanId}`;
+          addAudit(5, `Execute Routine Control (${profile.routineIdHex})`, `تنفيذ روتين معايرة نقطة الصفر (${profile.routineIdHex})`, profile.txCanId, reqHex, resp?.error || 'TIMEOUT', dur, false, finalOutcomeEn, finalOutcomeAr);
+          break;
+        }
+      }
+    } catch (e: any) {
+      finalOutcomeEn = `Exception during calibration routine: ${e?.message || e}`;
+      finalOutcomeAr = `حدث استثناء أثناء روتين المعايرة: ${e?.message || e}`;
+      addAudit(5, `Execute Routine Control (${profile.routineIdHex})`, `تنفيذ روتين معايرة نقطة الصفر (${profile.routineIdHex})`, profile.txCanId, routineReqHex, 'EXCEPT', 0, false, finalOutcomeEn, finalOutcomeAr);
+    }
+
+    // 6. Re-enable DTC Setting ON (0x85 0x01)
+    try {
+      await transportManager.sendRequest([0x85, 0x01], profile.txCanId);
+    } catch (e) {
+      // ignore
+    }
+
+    // Generate Raw Logs Text for audit review
+    let rawLogsText = `=== TOYOTA ABS ZERO POINT CALIBRATION RAW AUDIT LOG ===\n`;
+    rawLogsText += `Target Profile: ${profile.generationNameEn}\n`;
+    rawLogsText += `Target ECU TX CAN ID: ${profile.txCanId} | RX CAN ID: ${profile.rxCanId}\n`;
+    rawLogsText += `Routine ID: ${profile.routineIdHex}\n`;
+    rawLogsText += `Active DTCs Detected: ${activeDtcsFound.length > 0 ? activeDtcsFound.join(', ') : 'None'}\n\n`;
+
+    stepsAudit.forEach((step) => {
+      rawLogsText += `[STEP ${step.stepIndex}] ${step.nameEn}\n`;
+      rawLogsText += `  TX CAN ID: ${step.txCanId}\n`;
+      rawLogsText += `  Raw Request  : [${step.requestRawHex}]\n`;
+      rawLogsText += `  Raw Response : [${step.responseRawHex}]\n`;
+      rawLogsText += `  Status       : ${step.success ? 'SUCCESS' : 'FAILED'} (${step.durationMs}ms)\n`;
+      rawLogsText += `  Detail       : ${step.statusTextEn}\n\n`;
+    });
+
+    rawLogsText += `========================================================\n`;
+    rawLogsText += `FINAL RESULT: ${routineSuccess ? 'SUCCESS' : 'FAILED'}\n`;
+    rawLogsText += `OUTCOME     : ${finalOutcomeEn}\n`;
+    rawLogsText += `========================================================\n`;
+
+    return {
+      success: routineSuccess,
+      ecuTxCanId: profile.txCanId,
+      ecuRxCanId: profile.rxCanId,
+      routineIdHex: profile.routineIdHex,
+      dtcCheckPassed,
+      activeDtcsFound,
+      securityAccessRequired,
+      stepsAudit,
+      outcomeMessageEn: finalOutcomeEn,
+      outcomeMessageAr: finalOutcomeAr,
+      rawLogsText
+    };
+  }
   /**
    * Executes complete 7-step Toyota Routine sequence according to OEM spec:
    * 1. Extended Session (10 03)

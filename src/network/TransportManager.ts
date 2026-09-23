@@ -1134,33 +1134,39 @@ export class TransportManager {
       console.log(`[AUTO-SCAN] [TRYING CANDIDATE] Protocol ID=0x0${candidate.id.toString(16)} | ${candidate.name} (${candidate.bitrate})`);
       console.log(`==================================================`);
 
+      // Update active config protocol & CAN mode immediately so UI & logs reflect current candidate
+      this.updateConfig({
+        protocol: candidate.name,
+        canMode: candidate.canMode,
+      });
+
       // 1. Send CMD_CONFIG_PROTOCOL to reconfigure ESP32 TWAI bitrate & mode
       try {
         if (this.activeTransport.configureProtocol) {
-          console.log(`[AUTO-SCAN] Sending CMD_CONFIG_PROTOCOL (0x08) to ESP32: Protocol 0x0${candidate.id.toString(16)}`);
+          console.log(`[AUTO-SCAN] [CAN INIT] Sending CMD_CONFIG_PROTOCOL (0x08) to ESP32: Protocol 0x0${candidate.id.toString(16)}`);
           await this.activeTransport.configureProtocol(candidate.id);
-          // Allow ESP32 TWAI controller hardware driver 150ms to reset & settle on new bitrate
-          await new Promise(r => setTimeout(r, 150));
+          // Allow ESP32 TWAI controller hardware driver 200ms to reset & settle on new bitrate
+          await new Promise(r => setTimeout(r, 200));
         }
       } catch (err) {
         console.warn(`[AUTO-SCAN] Protocol config 0x0${candidate.id.toString(16)} threw:`, err);
       }
 
-      // Temporarily set active config CAN mode & protocol for diagnostic packet tagging
-      this.config.canMode = candidate.canMode;
-      this.config.protocol = candidate.name;
-
-      // Check CAN bus status prior to TX probe
+      // Query TWAI driver status before TX probe
+      let twaiStatus: CanBusStatus | null = null;
       try {
-        const canStatus = await this.getCanStatus();
-        console.log(`[AUTO-SCAN] TWAI Driver Status: State=${canStatus.state}, TxErr=${canStatus.txErrorCount}, RxErr=${canStatus.rxErrorCount}`);
+        twaiStatus = await this.getCanStatus();
       } catch (e) {
-        // ignore status check failure
+        // ignore status query failure
       }
 
-      // 2. Transmit OBD Probe Frame PID 0x00
+      const txErr = twaiStatus?.txErrorCount ?? 0;
+      const rxErr = twaiStatus?.rxErrorCount ?? 0;
+      const busErr = twaiStatus?.busOverrunCount ?? 0;
+
+      // 2. Transmit OBD Probe Frame (0x7DF for 11-bit or 0x18DB33F1 for 29-bit)
       const txDataHex = candidate.probeData.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
-      console.log(`[AUTO-SCAN] TX Probe: Target=${candidate.canId} (${candidate.canMode}) | DATA=[${txDataHex}]`);
+      console.log(`[AUTO-SCAN] [TX PROBE] Target=${candidate.canId} (${candidate.canMode}) | DATA=[${txDataHex}]`);
 
       const probeStartTime = performance.now();
       const response = await this.sendRequest(candidate.probeData, candidate.canId);
@@ -1168,13 +1174,19 @@ export class TransportManager {
 
       // 3. Evaluate if REAL CAN-RX was received from vehicle
       const hasRealRxData = (response.status === 'SUCCESS' || response.status === 'NRC') && !!response.responseRaw && response.responseRaw.trim().length > 0;
+      const rxEcuId = response.canIdHex || (hasRealRxData ? '0x7E8' : 'NONE');
+      const rxDataHex = response.responseRaw ? response.responseRaw.trim() : 'TIMEOUT / NO RX';
+
+      // Log exact requested format: PROTOCOL + BITRATE + CAN ID + TX + CAN RX + TWAI TX ERROR + RX ERROR + BUS ERROR
+      console.log(
+        `[AUTO-SCAN-LOG] PROTOCOL=${candidate.name} | BITRATE=${candidate.bitrate} | CAN ID=${candidate.canId} | TX=${txDataHex} | CAN RX=${rxEcuId} [${rxDataHex}] | TWAI TX ERROR=${txErr} | RX ERROR=${rxErr} | BUS ERROR=${busErr}`
+      );
 
       if (hasRealRxData) {
         totalCanRxCount++;
-        const rxEcuId = response.canIdHex || 'ECU';
-        const rxDataHex = response.responseRaw || '';
 
         console.log(`\n==================================================`);
+        console.log(`[AUTO-SCAN] CAN INIT → TX → ECU RX → Protocol Confirmed`);
         console.log(`[AUTO-SCAN] *** REAL VEHICLE ECU CAN-RX CONFIRMED! ***`);
         console.log(`[AUTO-SCAN] SUCCESSFUL PROTOCOL : ${candidate.name}`);
         console.log(`[AUTO-SCAN] BITRATE             : ${candidate.bitrate}`);
