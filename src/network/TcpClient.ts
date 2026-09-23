@@ -95,9 +95,19 @@ export class TCPClient {
       }, this.config.connectionTimeoutMs);
 
       try {
-        // In browser context, connect via standard WebSocket proxy to ESP32 TCP port
-        const wsUrl = `ws://${this.config.ip}:${this.config.port}`;
-        this.ws = new WebSocket(wsUrl);
+        const isHttps = typeof window !== 'undefined' && window.location && window.location.protocol === 'https:';
+        let wsUrl = `${isHttps ? 'wss' : 'ws'}://${this.config.ip}:${this.config.port}`;
+        
+        try {
+          this.ws = new WebSocket(wsUrl);
+        } catch (wsErr: any) {
+          if (isHttps && wsUrl.startsWith('wss://')) {
+            wsUrl = `ws://${this.config.ip}:${this.config.port}`;
+            this.ws = new WebSocket(wsUrl);
+          } else {
+            throw wsErr;
+          }
+        }
 
         this.ws.onopen = () => {
           clearTimeout(timeoutTimer);
@@ -162,7 +172,15 @@ export class TCPClient {
       } catch (err: any) {
         clearTimeout(timeoutTimer);
         this.setStatus('ERROR');
-        AppLogger.critical('NETWORK', 'SocketInit', 'Failed to initialize TCP client', 'فشل في تهيئة عميل TCP', undefined, { deviceState: 'ERROR', error: err });
+        const isHttpsSecurityError = err?.name === 'SecurityError' || (err?.message && (err.message.includes('HTTPS') || err.message.includes('insecure WebSocket')));
+        const msgEn = isHttpsSecurityError
+          ? `Insecure WebSocket blocked on HTTPS page. Open via HTTP, use Bluetooth (Web Serial / SPP), or use Mock Mode.`
+          : `Failed to initialize TCP client: ${err?.message || 'Unknown'}`;
+        const msgAr = isHttpsSecurityError
+          ? `حظر متصفح الويب اتصال Wi-Fi بسبب بروتوكول HTTPS. افتح الصفحة عبر HTTP أو استخدم البلوتوث أو وضع المحاكاة.`
+          : `فشل في تهيئة عميل TCP`;
+
+        AppLogger.critical('NETWORK', 'SocketInit', msgEn, msgAr, undefined, { deviceState: 'ERROR', error: err, isHttpsSecurityError });
         resolve(false);
       }
     });

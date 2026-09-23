@@ -78,7 +78,7 @@ export const ServiceFunctionsView: React.FC<ServiceFunctionsViewProps> = ({ stat
           attempts++;
           const resp = await transportManager.sendRequest(reqPayload, '0x7E0');
           
-          if (resp.status === 'SUCCESS') {
+          if (resp.status === 'SUCCESS' || resp.status === 'NRC') {
             const respBytes = resp.responseRaw ? resp.responseRaw.split(' ').map(h => parseInt(h, 16)) : [];
             if (respBytes[0] === 0x7F && respBytes[2] === 0x78) {
               console.log(`[SERVICE-FUNC] ECU returned NRC 0x78 (Response Pending). Waiting 2s...`);

@@ -7,6 +7,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(BluetoothSppPlugin.class);
+        registerPlugin(WifiTcpPlugin.class);
         super.onCreate(savedInstanceState);
     }
 }

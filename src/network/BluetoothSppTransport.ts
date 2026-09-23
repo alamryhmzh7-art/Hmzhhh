@@ -54,7 +54,8 @@ import {
 } from './binaryProtocol';
 
 import {
-  commLogger
+  commLogger,
+  AppLogger
 } from '../logging/logger';
 
 import {
@@ -2880,6 +2881,34 @@ export class BluetoothSppTransport implements ITransport {
 
       this.klineStatusResolver?.(
         pkt.klineStatus
+      );
+
+      return;
+    }
+
+    // -------------------------------------------------------------------------
+    // ERROR RESP (CMD_ERROR_RESP = 0x0E)
+    // -------------------------------------------------------------------------
+
+    if (
+      pkt.cmd ===
+        BinaryCommand.CMD_ERROR_RESP &&
+      pkt.errorResp
+    ) {
+      commLogger.logPacket({
+        direction: '[BT ERR]',
+        protocol: 'Binary Protocol',
+        decodedData: `CMD_ERROR_RESP 0x${pkt.errorResp.failedCmd.toString(16).padStart(2, '0').toUpperCase()}`,
+        responseRaw: `${pkt.errorResp.statusText} (0x${pkt.errorResp.statusCode.toString(16).padStart(2, '0').toUpperCase()}): ${pkt.errorResp.descriptionEn}`,
+        durationMs: 0,
+        status: 'ERROR'
+      });
+
+      AppLogger.error(
+        'PROTOCOL',
+        'FirmwareError',
+        `ESP32 Firmware Error for CMD 0x${pkt.errorResp.failedCmd.toString(16).padStart(2, '0').toUpperCase()}: ${pkt.errorResp.statusText} (${pkt.errorResp.descriptionEn})`,
+        `خطأ من ESP32 للأمر 0x${pkt.errorResp.failedCmd.toString(16).padStart(2, '0').toUpperCase()}: ${pkt.errorResp.descriptionAr}`
       );
 
       return;

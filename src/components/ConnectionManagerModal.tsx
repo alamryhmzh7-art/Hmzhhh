@@ -424,6 +424,14 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
               <p className="text-xs text-slate-500">
                 {isRtl ? 'افتراضيًا، يقوم ESP32 بإنشاء نقطة وصول SSID باسم ESP32-OBD-PRO وكلمة مرور 12345678' : 'By default, ESP32 creates Access Point SSID: ESP32-OBD-PRO (Pass: 12345678)'}
               </p>
+
+              {typeof window !== 'undefined' && window.location && window.location.protocol === 'https:' && (
+                <div className="p-2.5 rounded-lg bg-amber-950/40 border border-amber-800/60 text-amber-300 text-[11px] leading-relaxed">
+                  {isRtl
+                    ? 'تنويه: الصفحة تعمل ببروتوكول HTTPS. إذا رفض المتصفح الاتصال اللاسلكي ws:// المباشر بسبب سياسات الأمان، يمكنك استخدام خيار البلوتوث (Web Serial/SPP) أو استخدام وضع المحاكاة.'
+                    : 'Note: Page loaded over HTTPS. If browser blocks raw ws:// WebSocket, please use Bluetooth SPP / Web Serial or Mock Mode.'}
+                </div>
+              )}
             </div>
           ) : (
             <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 space-y-4 animate-in fade-in">

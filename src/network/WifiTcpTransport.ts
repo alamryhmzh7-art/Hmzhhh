@@ -37,6 +37,8 @@ import {
 import { commLogger, AppLogger } from '../logging/logger';
 
 import { mockEcuServer } from './mockEcuServer';
+import { Capacitor } from '@capacitor/core';
+import { WifiTcpNativePlugin } from './WifiTcpPlugin';
 
 export class WifiTcpTransport implements ITransport {
   public readonly type: TransportType = 'WIFI_TCP';
@@ -307,10 +309,80 @@ export class WifiTcpTransport implements ITransport {
       }, timeoutMs);
 
       try {
-        const wsUrl =
-          `ws://${this.config.ip}:${this.config.port}`;
+        if (Capacitor.isNativePlatform()) {
+          WifiTcpNativePlugin.connect({
+            ip: this.config.ip || '192.168.4.1',
+            port: this.config.port || 35000,
+            timeoutMs
+          }).then((res) => {
+            if (generation !== this.connectionGeneration) return;
+            clearTimeout(timeoutTimer);
+            this.setStatus('CONNECTED');
+            this.startHeartbeat(generation);
 
-        const socket = new WebSocket(wsUrl);
+            WifiTcpNativePlugin.removeAllListeners();
+            WifiTcpNativePlugin.addListener('dataReceived', (evt) => {
+              if (generation !== this.connectionGeneration) return;
+              if (evt && evt.dataBase64) {
+                const binaryString = atob(evt.dataBase64);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                  bytes[i] = binaryString.charCodeAt(i);
+                }
+                this.handleIncomingData(bytes);
+              }
+            });
+
+            WifiTcpNativePlugin.addListener('connectionError', (errEvt) => {
+              if (generation !== this.connectionGeneration) return;
+              clearTimeout(timeoutTimer);
+              this.stopHeartbeat();
+              if (this.status !== 'DISCONNECTED') {
+                this.setStatus('DISCONNECTED', errEvt?.error || 'Native TCP Disconnected');
+              }
+              finish(false);
+            });
+
+            AppLogger.info(
+              'NETWORK',
+              'WifiConnected',
+              `[WiFi Native TCP] Connected to ESP32 at ${this.config.ip}:${this.config.port}`,
+              `[WiFi] تم فتح اتصال Raw TCP المباشر بنجاح مع ESP32`
+            );
+            finish(true);
+          }).catch((err) => {
+            if (generation !== this.connectionGeneration) return;
+            clearTimeout(timeoutTimer);
+            this.setStatus('ERROR', err?.message || 'Native TCP Connect Failed');
+            AppLogger.error(
+              'NETWORK',
+              'WifiSocketError',
+              `Native TCP socket error: ${err?.message}`,
+              `تعذر إنشاء اتصال Raw TCP مع ESP32`
+            );
+            finish(false);
+          });
+          return;
+        }
+
+        const isHttps =
+          typeof window !== 'undefined' &&
+          window.location &&
+          window.location.protocol === 'https:';
+
+        let wsUrl = `${isHttps ? 'wss' : 'ws'}://${this.config.ip}:${this.config.port}`;
+
+        let socket: WebSocket;
+        try {
+          socket = new WebSocket(wsUrl);
+        } catch (wsErr: any) {
+          if (isHttps && wsUrl.startsWith('wss://')) {
+            wsUrl = `ws://${this.config.ip}:${this.config.port}`;
+            socket = new WebSocket(wsUrl);
+          } else {
+            throw wsErr;
+          }
+        }
 
         socket.binaryType = 'arraybuffer';
 
@@ -430,9 +502,13 @@ export class WifiTcpTransport implements ITransport {
       } catch (error: any) {
         clearTimeout(timeoutTimer);
 
-        const message =
-          error?.message ||
-          'Initialization Failed';
+        const isHttpsSecurityError =
+          error?.name === 'SecurityError' ||
+          (error?.message && (error.message.includes('HTTPS') || error.message.includes('insecure WebSocket')));
+
+        const message = isHttpsSecurityError
+          ? 'HTTPS Mixed Content Blocked'
+          : (error?.message || 'Initialization Failed');
 
         if (generation === this.connectionGeneration) {
           this.setStatus(
@@ -443,17 +519,26 @@ export class WifiTcpTransport implements ITransport {
           this.cleanupSocket();
         }
 
+        const msgEn = isHttpsSecurityError
+          ? `Insecure WebSocket connection (ws://${this.config.ip}:${this.config.port}) blocked by browser over HTTPS. Open via HTTP, use Bluetooth (Web Serial / SPP), or use Mock Mode.`
+          : `System exception while opening Wi-Fi socket: ${message}`;
+
+        const msgAr = isHttpsSecurityError
+          ? `حظر متصفح الويب اتصال Wi-Fi غير المشفر (ws://${this.config.ip}:${this.config.port}) نظراً لتحميل الصفحة عبر بروتوكول HTTPS. يُرجى فتح التطبيق عبر HTTP، أو استخدام البلوتوث (Web Serial/SPP)، أو وضع المحاكاة.`
+          : `حدث استثناء أثناء فتح اتصال Wi-Fi: ${message}`;
+
         AppLogger.error(
           'NETWORK',
           'WifiConnectException',
-          `System exception while opening Wi-Fi socket: ${message}`,
-          `حدث استثناء أثناء فتح اتصال Wi-Fi: ${message}`,
+          msgEn,
+          msgAr,
           error instanceof Error
             ? error.stack
             : undefined,
           {
             deviceState: 'ERROR',
-            generation
+            generation,
+            isHttpsSecurityError
           }
         );
 
@@ -487,6 +572,13 @@ export class WifiTcpTransport implements ITransport {
   }
 
   private cleanupSocket() {
+    if (Capacitor.isNativePlatform()) {
+      try {
+        WifiTcpNativePlugin.disconnect();
+        WifiTcpNativePlugin.removeAllListeners();
+      } catch {}
+    }
+
     const socket = this.socket;
 
     this.socket = null;
@@ -530,6 +622,49 @@ export class WifiTcpTransport implements ITransport {
 
     if (this.config.isMockMode) {
       return true;
+    }
+
+    if (Capacitor.isNativePlatform()) {
+      if (this.status !== 'CONNECTED') {
+        AppLogger.warn(
+          'NETWORK',
+          'WifiSendRaw',
+          'Cannot send data: Wi-Fi TCP disconnected',
+          'لا يمكن إرسال البيانات: اتصال Wi-Fi TCP غير متصل'
+        );
+        return false;
+      }
+
+      try {
+        let binaryString = '';
+        for (let i = 0; i < byteArr.length; i++) {
+          binaryString += String.fromCharCode(byteArr[i]);
+        }
+        const base64Data = btoa(binaryString);
+        await WifiTcpNativePlugin.send({ dataBase64: base64Data });
+
+        const hex = Array.from(byteArr)
+          .map(b => b.toString(16).padStart(2, '0').toUpperCase())
+          .join(' ');
+
+        commLogger.logPacket({
+          direction: '[WiFi TX]',
+          protocol: 'Binary Frame',
+          requestRaw: hex,
+          durationMs: 0,
+          status: 'SUCCESS'
+        });
+
+        return true;
+      } catch (error: any) {
+        AppLogger.error(
+          'NETWORK',
+          'WifiSendRawError',
+          `Native TCP send failed: ${error?.message || 'Unknown error'}`,
+          `فشل إرسال البيانات عبر Wi-Fi: ${error?.message || 'خطأ غير معروف'}`
+        );
+        return false;
+      }
     }
 
     if (
@@ -929,11 +1064,13 @@ export class WifiTcpTransport implements ITransport {
   // ---------------------------------------------------------------------------
 
   private handleIncomingData(
-    data: ArrayBuffer | string
+    data: ArrayBuffer | string | Uint8Array
   ) {
     let newBytes: Uint8Array;
 
-    if (typeof data === 'string') {
+    if (data instanceof Uint8Array) {
+      newBytes = data;
+    } else if (typeof data === 'string') {
       /*
        * WebSocket should normally be configured for binary data.
        *
@@ -1711,6 +1848,34 @@ export class WifiTcpTransport implements ITransport {
           pkt.klineStatus
         );
       }
+
+      return;
+    }
+
+    // -------------------------------------------------------------------------
+    // ERROR RESP (CMD_ERROR_RESP = 0x0E)
+    // -------------------------------------------------------------------------
+
+    if (
+      pkt.cmd ===
+        BinaryCommand.CMD_ERROR_RESP &&
+      pkt.errorResp
+    ) {
+      commLogger.logPacket({
+        direction: '[WiFi ERR]',
+        protocol: 'Binary Protocol',
+        decodedData: `CMD_ERROR_RESP 0x${pkt.errorResp.failedCmd.toString(16).padStart(2, '0').toUpperCase()}`,
+        responseRaw: `${pkt.errorResp.statusText} (0x${pkt.errorResp.statusCode.toString(16).padStart(2, '0').toUpperCase()}): ${pkt.errorResp.descriptionEn}`,
+        durationMs: 0,
+        status: 'ERROR'
+      });
+
+      AppLogger.error(
+        'PROTOCOL',
+        'FirmwareError',
+        `ESP32 Firmware Error for CMD 0x${pkt.errorResp.failedCmd.toString(16).padStart(2, '0').toUpperCase()}: ${pkt.errorResp.statusText} (${pkt.errorResp.descriptionEn})`,
+        `خطأ من ESP32 للأمر 0x${pkt.errorResp.failedCmd.toString(16).padStart(2, '0').toUpperCase()}: ${pkt.errorResp.descriptionAr}`
+      );
 
       return;
     }

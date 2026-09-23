@@ -36,6 +36,69 @@ import {
   ProtocolType
 } from '../types';
 
+export function decodeFirmwareStatusCode(statusCode: number): {
+  codeName: string;
+  descriptionEn: string;
+  descriptionAr: string;
+} {
+  switch (statusCode) {
+    case 0x00:
+      return {
+        codeName: 'SUCCESS',
+        descriptionEn: 'Operation completed successfully',
+        descriptionAr: 'تمت العملية بنجاح'
+      };
+    case 0x01:
+      return {
+        codeName: 'NO_VOLTAGE',
+        descriptionEn: 'No voltage detected on bus or OBD pin',
+        descriptionAr: 'لم يتم اكتشاف جهد كهربائي على المنفذ'
+      };
+    case 0x02:
+      return {
+        codeName: 'INIT_FAILED',
+        descriptionEn: 'Bus initialization failed',
+        descriptionAr: 'فشلت عملية تهيئة الناقل'
+      };
+    case 0x03:
+      return {
+        codeName: 'KEYBYTE_MISMATCH',
+        descriptionEn: 'Key byte mismatch during initialization',
+        descriptionAr: 'خطأ في تطابق البايتات الافتتاحية'
+      };
+    case 0x04:
+      return {
+        codeName: 'ECU_NO_RESPONSE',
+        descriptionEn: 'No response received from target ECU',
+        descriptionAr: 'لم يتم استلام أي رد من كمبيوتر السيارة'
+      };
+    case 0x05:
+      return {
+        codeName: 'CHECKSUM_ERROR',
+        descriptionEn: 'Checksum error in received packet',
+        descriptionAr: 'خطأ في المجموع التفاسري للبيانات'
+      };
+    case 0x06:
+      return {
+        codeName: 'CAN_ERROR',
+        descriptionEn: 'CAN bus transmission error or BUS_OFF state',
+        descriptionAr: 'خطأ في ناقل CAN أو حالة توقف الناقل (BUS_OFF)'
+      };
+    case 0x07:
+      return {
+        codeName: 'BUSY',
+        descriptionEn: 'CAN transceiver or hardware bus is busy or recovering',
+        descriptionAr: 'ناقل البيانات مشغول أو جاري التعافي'
+      };
+    default:
+      return {
+        codeName: `UNKNOWN_ERROR_0x${statusCode.toString(16).toUpperCase()}`,
+        descriptionEn: `Unknown firmware error code: 0x${statusCode.toString(16).toUpperCase()}`,
+        descriptionAr: `كود خطأ مجهول من الفريموير: 0x${statusCode.toString(16).toUpperCase()}`
+      };
+  }
+}
+
 export enum BinaryCommand {
   CMD_CAN_FRAME = 0x01,
   CMD_PING = 0x02,
@@ -50,6 +113,7 @@ export enum BinaryCommand {
   CMD_KLINE_FRAME = 0x0B,
   CMD_KLINE_STATUS_REQ = 0x0C,
   CMD_KLINE_STATUS_RESP = 0x0D,
+  CMD_ERROR_RESP = 0x0E,
   CMD_ERROR = 0xFF
 }
 
@@ -62,6 +126,14 @@ export interface DecodedBinaryPacket {
   canFrame?: CanFrame;
   canStatus?: CanBusStatus;
   klineStatus?: KlineStatus;
+
+  errorResp?: {
+    failedCmd: number;
+    statusCode: number;
+    statusText: string;
+    descriptionEn: string;
+    descriptionAr: string;
+  };
 
   klineInitResp?: {
     statusCode: number;
@@ -1339,76 +1411,24 @@ export class BinaryProtocol {
           ? payload[3]
           : 0;
 
-      let protoText:
-        ProtocolType =
-        'ISO 9141-2';
+      let protoText: ProtocolType = 'ISO 9141-2';
+      if (protoByte === 0x01) protoText = 'ISO 9141-2';
+      else if (protoByte === 0x02) protoText = 'ISO 14230-4 (KWP2000 Slow)';
+      else if (protoByte === 0x04) protoText = 'ISO 14230-4 (KWP2000 Fast)';
+      else if (protoByte === 0x05) protoText = 'ISO 14230-4 (KWP2000 Slow)';
+      else if (protoByte === 0x06) protoText = 'ISO 15765-4 (CAN 11/500)';
+      else if (protoByte === 0x07) protoText = 'ISO 15765-4 (CAN 29/500)';
+      else if (protoByte === 0x08) protoText = 'ISO 15765-4 (CAN 11/250)';
+      else if (protoByte === 0x09) protoText = 'ISO 15765-4 (CAN 29/250)';
 
-      if (
-        protoByte === 0x01
-      ) {
-        protoText =
-          'ISO 15765-4 (CAN 11/500)';
-      } else if (
-        protoByte === 0x02
-      ) {
-        protoText =
-          'ISO 15765-4 (CAN 29/500)';
-      } else if (
-        protoByte === 0x03
-      ) {
-        protoText =
-          'ISO 15765-4 (CAN 11/250)';
-      } else if (
-        protoByte === 0x04
-      ) {
-        protoText =
-          'ISO 15765-4 (CAN 29/250)';
-      } else if (
-        protoByte === 0x06
-      ) {
-        protoText =
-          'ISO 14230-4 (KWP2000 Fast)';
-      } else if (
-        protoByte === 0x07
-      ) {
-        protoText =
-          'ISO 14230-4 (KWP2000 Slow)';
-      } else if (
-        protoByte === 0x05
-      ) {
-        protoText =
-          'ISO 9141-2';
-      }
-
-      let statusText =
-        'SUCCESS';
-
-      if (
-        statusCode === 0x01
-      ) {
-        statusText =
-          'NO_KLINE_VOLTAGE';
-      } else if (
-        statusCode === 0x02
-      ) {
-        statusText =
-          'INIT_FAILED';
-      } else if (
-        statusCode === 0x03
-      ) {
-        statusText =
-          'KEYBYTE_MISMATCH';
-      } else if (
-        statusCode === 0x04
-      ) {
-        statusText =
-          'ECU_NO_RESPONSE';
-      } else if (
-        statusCode === 0x05
-      ) {
-        statusText =
-          'CHECKSUM_ERROR';
-      }
+      let statusText = 'SUCCESS';
+      if (statusCode === 0x01) statusText = 'NO_KLINE_VOLTAGE';
+      else if (statusCode === 0x02) statusText = 'INIT_FAILED';
+      else if (statusCode === 0x03) statusText = 'KEYBYTE_MISMATCH';
+      else if (statusCode === 0x04) statusText = 'ECU_NO_RESPONSE';
+      else if (statusCode === 0x05) statusText = 'CHECKSUM_ERROR';
+      else if (statusCode === 0x06) statusText = 'CAN_ERROR';
+      else if (statusCode === 0x07) statusText = 'BUSY';
 
       result.klineInitResp = {
         statusCode,
@@ -1528,41 +1548,15 @@ export class BinaryProtocol {
           ? payload[7]
           : 0;
 
-      let protoText:
-        ProtocolType =
-        'ISO 9141-2';
-
-      if (
-        protoByte === 0x01
-      ) {
-        protoText =
-          'ISO 15765-4 (CAN 11/500)';
-      } else if (
-        protoByte === 0x02
-      ) {
-        protoText =
-          'ISO 15765-4 (CAN 29/500)';
-      } else if (
-        protoByte === 0x03
-      ) {
-        protoText =
-          'ISO 15765-4 (CAN 11/250)';
-      } else if (
-        protoByte === 0x04
-      ) {
-        protoText =
-          'ISO 15765-4 (CAN 29/250)';
-      } else if (
-        protoByte === 0x06
-      ) {
-        protoText =
-          'ISO 14230-4 (KWP2000 Fast)';
-      } else if (
-        protoByte === 0x07
-      ) {
-        protoText =
-          'ISO 14230-4 (KWP2000 Slow)';
-      }
+      let protoText: ProtocolType = 'ISO 9141-2';
+      if (protoByte === 0x01) protoText = 'ISO 9141-2';
+      else if (protoByte === 0x02) protoText = 'ISO 14230-4 (KWP2000 Slow)';
+      else if (protoByte === 0x04) protoText = 'ISO 14230-4 (KWP2000 Fast)';
+      else if (protoByte === 0x05) protoText = 'ISO 14230-4 (KWP2000 Slow)';
+      else if (protoByte === 0x06) protoText = 'ISO 15765-4 (CAN 11/500)';
+      else if (protoByte === 0x07) protoText = 'ISO 15765-4 (CAN 29/500)';
+      else if (protoByte === 0x08) protoText = 'ISO 15765-4 (CAN 11/250)';
+      else if (protoByte === 0x09) protoText = 'ISO 15765-4 (CAN 29/250)';
 
       let lastErr:
         KlineStatus['lastErrorCode'] =
@@ -1610,6 +1604,30 @@ export class BinaryProtocol {
     }
 
     // ==========================================================
+    // ERROR RESPONSE (CMD_ERROR_RESP = 0x0E)
+    // ==========================================================
+    if (cmd === BinaryCommand.CMD_ERROR_RESP) {
+      const failedCmd = payload.length >= 1 ? payload[0] : 0;
+      const statusCode = payload.length >= 2 ? payload[1] : 0x02;
+      const statusInfo = decodeFirmwareStatusCode(statusCode);
+
+      result.errorResp = {
+        failedCmd,
+        statusCode,
+        statusText: statusInfo.codeName,
+        descriptionEn: statusInfo.descriptionEn,
+        descriptionAr: statusInfo.descriptionAr
+      };
+
+      this.warn(
+        `[CMD_ERROR_RESP] Failed CMD=0x${failedCmd.toString(16).padStart(2, '0').toUpperCase()}, ` +
+        `Status=0x${statusCode.toString(16).padStart(2, '0').toUpperCase()} (${statusInfo.codeName}: ${statusInfo.descriptionEn})`
+      );
+
+      return result;
+    }
+
+    // ==========================================================
     // UNKNOWN COMMAND
     // ==========================================================
     /*
@@ -1625,16 +1643,17 @@ export class BinaryProtocol {
   /**
    * Configure protocol.
    *
-   * ESP32 protocol IDs:
+   * ESP32 Firmware V7 protocol IDs:
    *
    * 0x00 = AUTO
-   * 0x01 = CAN 11/500
-   * 0x02 = CAN 29/500
-   * 0x03 = CAN 11/250
-   * 0x04 = CAN 29/250
-   * 0x05 = ISO9141
-   * 0x06 = KWP Fast
-   * 0x07 = KWP Slow
+   * 0x01 = ISO9141 (ISO 9141-2)
+   * 0x02 = KWP 5-Baud (ISO 14230-4 KWP2000 5-Baud)
+   * 0x04 = KWP Fast (ISO 14230-4 KWP2000 Fast)
+   * 0x05 = KWP Slow (ISO 14230-4 KWP2000 Slow)
+   * 0x06 = CAN 11-bit / 500k
+   * 0x07 = CAN 29-bit / 500k
+   * 0x08 = CAN 11-bit / 250k
+   * 0x09 = CAN 29-bit / 250k
    */
   public static encodeConfigProtocol(
     protocolId: number

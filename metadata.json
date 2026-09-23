@@ -1,7 +1,6 @@
 {
   "name": "HAMZA OBD PRO v3 FINAL",
   "description": "منصة احترافية متكاملة لتشخيص أعطال السيارات وقراءة البيانات الحية عبر أجهزة ESP32 OBD مع دعم كامل للعربية وRTL",
-  
   "requestFramePermissions": [
     "bluetooth"
   ],

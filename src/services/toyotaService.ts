@@ -285,7 +285,7 @@ export class ToyotaService {
       try {
         const resp = await transportManager.sendRequest(step.reqBytes, targetAddr);
 
-        if (resp && resp.status === 'SUCCESS' && resp.responseRaw) {
+        if (resp && (resp.status === 'SUCCESS' || resp.status === 'NRC') && resp.responseRaw) {
           respHex = resp.responseRaw;
           const respTokens = (respHex.trim().split(/\s+/) || []).filter(Boolean);
           const respBytes = (respTokens || []).map(h => parseInt(h, 16)).filter(n => !isNaN(n));
@@ -299,7 +299,7 @@ export class ToyotaService {
               console.log(`[TOYOTA-SERVICE] Step ${step.index} returned NRC 0x78. Waiting 3000ms...`);
               await new Promise(r => setTimeout(r, 3000));
               const retryResp = await transportManager.sendRequest(step.reqBytes, targetAddr);
-              if (retryResp && retryResp.status === 'SUCCESS' && retryResp.responseRaw) {
+              if (retryResp && (retryResp.status === 'SUCCESS' || retryResp.status === 'NRC') && retryResp.responseRaw) {
                 respHex = retryResp.responseRaw;
                 success = true;
               }

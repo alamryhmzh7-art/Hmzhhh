@@ -201,7 +201,7 @@ export class UdsService {
 
       const resp = await transportManager.sendRequest(reqBytes, targetEcuAddrHex);
 
-      if (resp && resp.status === 'SUCCESS' && resp.responseRaw) {
+      if (resp && (resp.status === 'SUCCESS' || resp.status === 'NRC') && resp.responseRaw) {
         const rawHex = resp.responseRaw;
         const respTokens = (rawHex.trim().split(/\s+/) || []).filter(Boolean);
         const respBytes = (respTokens || []).map(h => parseInt(h, 16)).filter(n => !isNaN(n));
