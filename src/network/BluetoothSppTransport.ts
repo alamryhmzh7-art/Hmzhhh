@@ -1510,6 +1510,17 @@ export class BluetoothSppTransport implements ITransport {
   // CAN TX
   // ===========================================================================
 
+  public async configureProtocol(protocolId: number): Promise<boolean> {
+    const packet = BinaryProtocol.encodeConfigProtocol(protocolId);
+    AppLogger.info(
+      'PROTOCOL',
+      'ConfigProtocol',
+      `[BT] Sending CMD_CONFIG_PROTOCOL 0x${protocolId.toString(16).padStart(2, '0').toUpperCase()} to ESP32`,
+      `إرسال إعداد البروتوكول 0x${protocolId.toString(16).padStart(2, '0').toUpperCase()} عبر البلوتوث`
+    );
+    return this.sendRaw(packet);
+  }
+
   public async sendCanFrame(
     canId: number,
     data: number[],

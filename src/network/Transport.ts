@@ -118,10 +118,15 @@ export interface ITransport {
 * false = 11-bit CAN ID
   */
   sendCanFrame(
-  canId: number,
-  data: number[],
-  isExtended?: boolean
+    canId: number,
+    data: number[],
+    isExtended?: boolean
   ): Promise<boolean>;
+
+  /**
+   * Configure protocol/bitrate on ESP32 firmware.
+   */
+  configureProtocol?(protocolId: number): Promise<boolean>;
 
 /**
 
