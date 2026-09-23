@@ -241,6 +241,58 @@ struct IsoTpTransaction {
 };
 
 // ============================================================================
+// UDS State + Service Presets
+// ============================================================================
+struct UdsState {
+  bool extendedSession;
+  bool programmingSession;
+  bool securityUnlocked;
+  uint8_t securityLevel;
+  bool autoTesterPresent;
+  unsigned long lastTesterPresent;
+  uint16_t testerPresentIntervalMs;
+} udsState = {false, false, false, 0, true, 0, 1500};
+
+struct ServicePreset {
+  const char* name;
+  const uint8_t* commands[6];
+  uint8_t lengths[6];
+  uint16_t delayMs[6];
+  uint8_t count;
+};
+
+// قوالب جاهزة للتصفير التلقائي
+static const uint8_t svc_extSession[]    = {0x10, 0x03};
+static const uint8_t svc_testerPresent[] = {0x3E, 0x00};
+static const uint8_t svc_oilReset1[]     = {0x31, 0x01, 0x01, 0x10};
+static const uint8_t svc_oilReset2[]     = {0x31, 0x02, 0x01, 0x10};
+static const uint8_t svc_gsensor1[]      = {0x31, 0x01, 0x03, 0x05};
+static const uint8_t svc_gsensor2[]      = {0x31, 0x02, 0x03, 0x05};
+
+const ServicePreset servicePresets[] = {
+  {
+    "OIL",
+    {svc_extSession, svc_testerPresent, svc_oilReset1, svc_oilReset2},
+    {2, 2, 4, 4},
+    {200, 500, 500, 500},
+    4
+  },
+  {
+    "GSENSOR",
+    {svc_extSession, svc_testerPresent, svc_gsensor1, svc_gsensor2},
+    {2, 2, 4, 4},
+    {200, 500, 1500, 500},
+    4
+  },
+};
+const uint8_t SERVICE_PRESET_COUNT = sizeof(servicePresets) / sizeof(ServicePreset);
+
+void udsTick();
+void udsPostProcess(const uint8_t* txBytes, size_t txLen,
+                    const uint8_t* rxBytes, size_t rxLen);
+void udsRunPreset(uint8_t presetIndex, ActiveTransport transport);
+
+// ============================================================================
 // Function declarations
 // ============================================================================
 
@@ -906,6 +958,97 @@ void dispatchCanRx() {
 }
 
 // ============================================================================
+// UDS Functions
+// ============================================================================
+
+void udsTick() {
+  if (!udsState.autoTesterPresent) return;
+  if (!udsState.extendedSession && !udsState.programmingSession) return;
+  if (isoTp.active) return;
+  if (!stats.canInitialized) return;
+
+  unsigned long now = millis();
+  if (now - udsState.lastTesterPresent >= udsState.testerPresentIntervalMs) {
+    udsState.lastTesterPresent = now;
+    uint8_t tp[2] = {0x3E, 0x00};
+    uint8_t activeP = (elmConfig.protocol == PROTO_AUTO)
+      ? elmConfig.activeProtocol : elmConfig.protocol;
+    if (activeP == PROTO_CAN_11_500 || activeP == PROTO_CAN_29_500 ||
+        activeP == PROTO_CAN_11_250 || activeP == PROTO_CAN_29_250) {
+      executeCanIsoTpAttempt(tp, 2, activeP, false, TRANSPORT_NONE);
+    }
+  }
+}
+
+void udsPostProcess(const uint8_t* txBytes, size_t txLen,
+                    const uint8_t* rxBytes, size_t rxLen) {
+  if (txLen < 1 || rxLen < 1) return;
+  uint8_t sentSid = txBytes[0];
+  uint8_t recvSid = rxBytes[0];
+  bool positive = (recvSid == (uint8_t)(sentSid + 0x40));
+
+  if (sentSid == 0x10 && txLen >= 2 && positive) {
+    uint8_t session = txBytes[1];
+    if (session == 0x01) {
+      udsState.extendedSession = false;
+      udsState.programmingSession = false;
+      udsState.securityUnlocked = false;
+    } else if (session == 0x02) {
+      udsState.programmingSession = true;
+      udsState.extendedSession = true;
+    } else if (session == 0x03) {
+      udsState.extendedSession = true;
+      udsState.programmingSession = false;
+    }
+    udsState.lastTesterPresent = millis();
+  }
+
+  if (sentSid == 0x27 && txLen >= 2 && positive) {
+    if (txBytes[1] == 0x02 || txBytes[1] == 0x04 || txBytes[1] == 0x06) {
+      udsState.securityUnlocked = true;
+    }
+  }
+
+  if (sentSid == 0x3E && positive) {
+    udsState.lastTesterPresent = millis();
+  }
+
+  if (sentSid == 0x11 && positive) {
+    udsState.extendedSession = false;
+    udsState.programmingSession = false;
+    udsState.securityUnlocked = false;
+  }
+}
+
+void udsRunPreset(uint8_t presetIndex, ActiveTransport transport) {
+  if (presetIndex >= SERVICE_PRESET_COUNT) {
+    sendElmResponse("?\r\n>", transport);
+    return;
+  }
+
+  const ServicePreset& p = servicePresets[presetIndex];
+  char buf[80];
+  sprintf(buf, "RUN %s\r\n", p.name);
+  sendElmResponseChunk(buf, transport);
+
+  for (uint8_t i = 0; i < p.count; i++) {
+    if (p.commands[i] == nullptr || p.lengths[i] == 0) continue;
+    if (isoTp.active) {
+      unsigned long waitStart = millis();
+      while (isoTp.active && (millis() - waitStart) < 3000) {
+        dispatchCanRx();
+        yield();
+      }
+    }
+    if (p.delayMs[i] > 0) delay(p.delayMs[i]);
+    executeIsoTpTransaction(p.commands[i], p.lengths[i], transport);
+  }
+
+  sendElmResponse("DONE\r\n>", transport);
+}
+
+
+// ============================================================================
 // Setup
 // ============================================================================
 
@@ -987,9 +1130,9 @@ void loop() {
   }
 
   dispatchCanRx();
+  udsTick();
   yield();
 }
-
 // ============================================================================
 // Binary protocol checksum
 // ============================================================================
@@ -1569,6 +1712,7 @@ bool executeCanIsoTpAttempt(const uint8_t* txBytes, size_t txLen,
     if (elmConfig.protocol == PROTO_AUTO) {
       elmConfig.activeProtocol = protocol;
     }
+    udsPostProcess(txBytes, txLen, isoTp.buffer, isoTp.currentLen);
     if (emitResponse) streamIsoTpResponse(transport);
     return true;
   }
@@ -1945,8 +2089,50 @@ void processElmLine(const char* rawLine, ActiveTransport transport) {
       isoTp.active = false;
       klineState.initialized = false;
       sendElmResponse("OK\r\n>", transport);
-
-    } else if (strcmp(cmd, "BD") == 0) {
+    
+        } else if (strcmp(cmd, "UDS") == 0) {
+      char statusBuf[96];
+      const char* sessStr = "DEF";
+      if (udsState.programmingSession) sessStr = "PRG";
+      else if (udsState.extendedSession) sessStr = "EXT";
+      sprintf(statusBuf, "SESSION:%s SEC:%s TP:%s\r\n>",
+        sessStr,
+        udsState.securityUnlocked ? "UNLOCK" : "LOCK",
+        udsState.autoTesterPresent ? "ON" : "OFF");
+      sendElmResponse(statusBuf, transport);
+    }
+    else if (strcmp(cmd, "TP0") == 0) { udsState.autoTesterPresent = false; sendElmResponse("OK\r\n>", transport); }
+    else if (strcmp(cmd, "TP1") == 0) { udsState.autoTesterPresent = true;  sendElmResponse("OK\r\n>", transport); }
+    else if (strncmp(cmd, "SERVICE", 7) == 0) {
+      const char* idxStr = cmd + 7;
+      uint32_t idx = 0;
+      if (!parseHexUint32(idxStr, idx) || idx >= SERVICE_PRESET_COUNT) {
+        sendElmResponse("?\r\n>", transport);
+        return;
+      }
+      udsRunPreset(idx, transport);
+      return;
+    }
+    else if (strncmp(cmd, "UDS", 3) == 0) {
+      const char* arg = cmd + 3;
+      size_t argLen = strlen(arg);
+      if (argLen == 0 || argLen % 2 != 0 || argLen > 16) {
+        sendElmResponse("?\r\n>", transport);
+        return;
+      }
+      uint8_t bytes[8];
+      size_t byteLen = 0;
+      for (size_t i = 0; i < argLen && byteLen < 8; i += 2) {
+        char bStr[3] = {arg[i], arg[i+1], '\0'};
+        uint32_t bv = 0;
+        if (!parseHexUint32(bStr, bv)) { sendElmResponse("?\r\n>", transport); return; }
+        bytes[byteLen++] = (uint8_t)bv;
+      }
+      executeIsoTpTransaction(bytes, byteLen, transport);
+      return;
+    }
+    
+     else if (strcmp(cmd, "BD") == 0) {
       sendElmResponse("38400\r\n>", transport);
 
     } else {
