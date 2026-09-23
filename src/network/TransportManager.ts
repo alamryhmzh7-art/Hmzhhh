@@ -1119,12 +1119,10 @@ export class TransportManager {
 
     AppLogger.info('AUTO-SCAN', 'EcuLink', 'Starting Real Car ECU Link & Auto Protocol/Bitrate Scan...', 'بدء الفحص الحقيقي للاتصال وسياسة التعرف التلقائي...');
 
-    // Define the required CAN protocol candidates in exact order:
+    // Define CAN 11-bit protocol candidates ONLY in exact priority order:
     const canCandidates = [
-      { id: 0x06, name: 'ISO 15765-4 (CAN 11/500)', canMode: '11-bit' as const, bitrate: '500K', canId: '0x7DF', probeData: [0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00] },
-      { id: 0x08, name: 'ISO 15765-4 (CAN 11/250)', canMode: '11-bit' as const, bitrate: '250K', canId: '0x7DF', probeData: [0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00] },
-      { id: 0x07, name: 'ISO 15765-4 (CAN 29/500)', canMode: '29-bit' as const, bitrate: '500K', canId: '0x18DB33F1', probeData: [0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00] },
-      { id: 0x09, name: 'ISO 15765-4 (CAN 29/250)', canMode: '29-bit' as const, bitrate: '250K', canId: '0x18DB33F1', probeData: [0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00] },
+      { id: 0x06, name: 'ISO 15765-4 (CAN 11/500)', canMode: '11-bit' as const, bitrate: '500K', canId: '0x7DF', probeData: [0x02, 0x01, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00] },
+      { id: 0x08, name: 'ISO 15765-4 (CAN 11/250)', canMode: '11-bit' as const, bitrate: '250K', canId: '0x7DF', probeData: [0x02, 0x01, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00] },
     ];
 
     let totalCanRxCount = 0;
@@ -1164,7 +1162,7 @@ export class TransportManager {
       const rxErr = twaiStatus?.rxErrorCount ?? 0;
       const busErr = twaiStatus?.busOverrunCount ?? 0;
 
-      // 2. Transmit OBD Probe Frame (0x7DF for 11-bit or 0x18DB33F1 for 29-bit)
+      // 2. Transmit OBD Probe Frame (0x7DF for 11-bit)
       const txDataHex = candidate.probeData.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
       console.log(`[AUTO-SCAN] [TX PROBE] Target=${candidate.canId} (${candidate.canMode}) | DATA=[${txDataHex}]`);
 
@@ -1172,7 +1170,7 @@ export class TransportManager {
       const response = await this.sendRequest(candidate.probeData, candidate.canId);
       const probeDurationMs = Math.round(performance.now() - probeStartTime);
 
-      // 3. Evaluate if REAL CAN-RX was received from vehicle
+      // 3. Evaluate if REAL CAN-RX was received from vehicle (0x7E8–0x7EF)
       const hasRealRxData = (response.status === 'SUCCESS' || response.status === 'NRC') && !!response.responseRaw && response.responseRaw.trim().length > 0;
       const rxEcuId = response.canIdHex || (hasRealRxData ? '0x7E8' : 'NONE');
       const rxDataHex = response.responseRaw ? response.responseRaw.trim() : 'TIMEOUT / NO RX';
@@ -1214,34 +1212,7 @@ export class TransportManager {
       }
     }
 
-    // 6. ALL CAN PROTOCOLS FAILED. Only now attempt K-Line fallback!
-    console.warn(`[AUTO-SCAN] All CAN protocols (11/500, 11/250, 29/500, 29/250) failed to get CAN-RX from vehicle ECU.`);
-    console.log(`[AUTO-SCAN] Attempting K-Line auto-initialization fallback...`);
-
-    try {
-      const klineInit = await this.initKline(0x00);
-      console.log(`[AUTO-SCAN] K-Line Init result: success=${klineInit.success}, KB1=0x${klineInit.keyByte1.toString(16)}, KB2=0x${klineInit.keyByte2.toString(16)}`);
-
-      if (klineInit.success && (klineInit.keyByte1 !== 0x00 || klineInit.keyByte2 !== 0x00)) {
-        const klineProtoName = klineInit.activeProtocol === 0x06 ? 'ISO 14230-4 (KWP2000 Fast)' : 'ISO 9141-2';
-        this.updateConfig({ protocol: klineProtoName });
-
-        const klineResp = await this.activeTransport.sendKlineFrame?.([0x01, 0x00]);
-        if (klineResp && klineResp.status === 0 && klineResp.data && klineResp.data.length > 0) {
-          const klineRxHex = klineResp.data.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
-          console.log(`[AUTO-SCAN] *** REAL K-LINE RX CONFIRMED! *** Protocol=${klineProtoName}, Data=[${klineRxHex}]`);
-          return true;
-        } else {
-          console.warn(`[AUTO-SCAN] K-Line frame send produced no RX data.`);
-        }
-      } else {
-        console.warn(`[AUTO-SCAN] K-Line KB1/KB2 invalid (0x00 0x00). K-Line connection rejected.`);
-      }
-    } catch (kerr) {
-      console.warn(`[AUTO-SCAN] K-Line fallback error:`, kerr);
-    }
-
-    console.error(`[AUTO-SCAN] NO REAL CAN-RX OR K-LINE RX RECEIVED FROM ECU. VEHICLE IS NOT CONNECTED.`);
+    console.error(`[AUTO-SCAN] NO REAL CAN-RX RECEIVED FROM ECU (0x7E8-0x7EF). VEHICLE IS NOT CONNECTED.`);
     return false;
   }
 

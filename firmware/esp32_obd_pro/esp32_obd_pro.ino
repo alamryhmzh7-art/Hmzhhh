@@ -653,14 +653,16 @@ bool initCAN(uint32_t speedKbps) {
   stats.canInitialized = false;
 
   twai_status_info_t s_cur;
-  if (twai_get_status_info(&s_cur) == ESP_OK) {
-    if (s_cur.state == TWAI_STATE_RUNNING) {
-      twai_stop();
-    }
-    twai_driver_uninstall();
-  } else {
-    twai_driver_uninstall();
+  esp_err_t get_stat_err = twai_get_status_info(&s_cur);
+
+  const char* stopRes = "SKIPPED";
+  if (get_stat_err == ESP_OK && s_cur.state == TWAI_STATE_RUNNING) {
+    esp_err_t stop_err = twai_stop();
+    stopRes = (stop_err == ESP_OK) ? "SUCCESS" : "FAILED";
   }
+
+  esp_err_t uninst_err = twai_driver_uninstall();
+  const char* uninstRes = (uninst_err == ESP_OK) ? "SUCCESS" : (get_stat_err == ESP_OK ? "FAILED" : "SKIPPED");
 
   twai_general_config_t g_config =
     TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN, TWAI_MODE_NORMAL);
@@ -676,22 +678,25 @@ bool initCAN(uint32_t speedKbps) {
   twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
   esp_err_t inst_err = twai_driver_install(&g_config, &t_config, &f_config);
-  if (inst_err != ESP_OK) {
-    Serial.printf("[CAN-INIT]\nRESULT=FAILED (install err 0x%X)\n", inst_err);
-    return false;
+  const char* instRes = (inst_err == ESP_OK) ? "SUCCESS" : "FAILED";
+
+  const char* startRes = "SKIPPED";
+  if (inst_err == ESP_OK) {
+    esp_err_t start_err = twai_start();
+    startRes = (start_err == ESP_OK) ? "SUCCESS" : "FAILED";
   }
 
-  esp_err_t start_err = twai_start();
-  if (start_err != ESP_OK) {
-    twai_driver_uninstall();
-    Serial.printf("[CAN-INIT]\nRESULT=FAILED (start err 0x%X)\n", start_err);
-    return false;
+  bool overallSuccess = (inst_err == ESP_OK && strcmp(startRes, "SUCCESS") == 0);
+
+  Serial.printf("[CAN-RECOVERY]\nSTOP=%s\nUNINSTALL=%s\nINSTALL=%s\nSTART=%s\nRESULT=%s\n",
+                stopRes, uninstRes, instRes, startRes, overallSuccess ? "SUCCESS" : "FAILED");
+
+  if (overallSuccess) {
+    stats.canInitialized = true;
+    currentCanSpeedKbps = speedKbps;
   }
 
-  stats.canInitialized = true;
-  currentCanSpeedKbps = speedKbps;
-  Serial.printf("[CAN-INIT]\nRESULT=SUCCESS\nBITRATE=%uK\n", speedKbps);
-  return true;
+  return overallSuccess;
 }
 
 // ============================================================================
@@ -1275,24 +1280,33 @@ void handleParsedCommand(uint8_t cmd, uint16_t len,
       twai_status_info_t s_before;
       esp_err_t stat_before = twai_get_status_info(&s_before);
 
-      const char* stateStrBefore = (stat_before != ESP_OK) ? "UNINITIALIZED" :
+      bool driverInstalled = (stat_before == ESP_OK);
+      bool driverRunning = (stat_before == ESP_OK && s_before.state == TWAI_STATE_RUNNING);
+      bool isBusOff = (stat_before == ESP_OK && s_before.state == TWAI_STATE_BUS_OFF);
+      bool isErrorPassive = (stat_before == ESP_OK && (s_before.tx_error_counter >= 128 || s_before.rx_error_counter >= 128));
+
+      const char* stateStrBefore = (!driverInstalled) ? "UNINITIALIZED" :
         (s_before.state == TWAI_STATE_STOPPED) ? "STOPPED" :
         (s_before.state == TWAI_STATE_RUNNING) ? "RUNNING" :
         (s_before.state == TWAI_STATE_BUS_OFF) ? "BUS-OFF" : "RECOVERING";
 
       Serial.printf("\n========================================\n");
       Serial.printf("[CAN-STATE-BEFORE]\n");
+      Serial.printf("STATE=%s\n", stateStrBefore);
       Serial.printf("PROTOCOL=0x%02X\n", elmConfig.activeProtocol);
       Serial.printf("BITRATE=%uK\n", currentCanSpeedKbps);
-      Serial.printf("STATE=%s\n", stateStrBefore);
-      Serial.printf("TX_ERR=%u\n", (stat_before == ESP_OK) ? s_before.tx_error_counter : 0);
-      Serial.printf("RX_ERR=%u\n", (stat_before == ESP_OK) ? s_before.rx_error_counter : 0);
-      Serial.printf("BUS_ERR=%u\n", (stat_before == ESP_OK) ? s_before.bus_error_count : 0);
-      Serial.printf("BUS_OFF=%s\n", (stat_before == ESP_OK && s_before.state == TWAI_STATE_BUS_OFF) ? "YES" : "NO");
+      Serial.printf("TX_ERR=%u\n", driverInstalled ? s_before.tx_error_counter : 0);
+      Serial.printf("RX_ERR=%u\n", driverInstalled ? s_before.rx_error_counter : 0);
+      Serial.printf("BUS_ERR=%u\n", driverInstalled ? s_before.bus_error_count : 0);
+      Serial.printf("ARB_LOST=%u\n", driverInstalled ? s_before.arb_lost_count : 0);
+      Serial.printf("BUS_OFF=%s\n", isBusOff ? "YES" : "NO");
+      Serial.printf("ERROR_PASSIVE=%s\n", isErrorPassive ? "YES" : "NO");
+      Serial.printf("DRIVER_INSTALLED=%s\n", driverInstalled ? "YES" : "NO");
+      Serial.printf("DRIVER_RUNNING=%s\n", driverRunning ? "YES" : "NO");
 
-      // 2. Real Hardware Recovery: If BUS-OFF or RECOVERING or UNINITIALIZED -> Re-initialize CAN driver
-      if (stat_before != ESP_OK || s_before.state == TWAI_STATE_BUS_OFF || s_before.state == TWAI_STATE_RECOVERING) {
-        Serial.println("[CAN-INIT] BUS-OFF / RECOVERING / UNINITIALIZED detected -> Forcing TWAI reset & reinstall");
+      // 2. Real Hardware Recovery: If NOT running or BUS-OFF or RECOVERING -> Re-initialize CAN driver
+      if (!driverRunning) {
+        Serial.println("[CAN-INIT] TWAI Driver not in RUNNING state -> Executing recovery/reinitialize...");
         bool initOk = initCAN(currentCanSpeedKbps);
         if (!initOk) {
           stats.txErrorCount++;
@@ -1300,17 +1314,20 @@ void handleParsedCommand(uint8_t cmd, uint16_t len,
           sendBinaryPacket(CMD_ERROR_RESP, e, 2, transport);
           break;
         }
-      } else if (s_before.state == TWAI_STATE_STOPPED) {
-        if (twai_start() != ESP_OK) {
-          initCAN(currentCanSpeedKbps);
-        } else {
-          Serial.println("[CAN-INIT]\nRESULT=SUCCESS");
-        }
-      } else {
-        Serial.println("[CAN-INIT]\nRESULT=SUCCESS");
       }
 
-      // 3. Transmit Frame
+      // 3. Confirm RUNNING state after recovery/init
+      twai_status_info_t s_check;
+      if (twai_get_status_info(&s_check) != ESP_OK || s_check.state != TWAI_STATE_RUNNING) {
+        Serial.println("[CAN-INIT]\nRESULT=FAILED");
+        stats.txErrorCount++;
+        uint8_t e[2] = { CMD_CAN_FRAME, STATUS_INIT_FAILED };
+        sendBinaryPacket(CMD_ERROR_RESP, e, 2, transport);
+        break;
+      }
+      Serial.println("[CAN-INIT]\nRESULT=SUCCESS");
+
+      // 4. Transmit Frame
       twai_message_t txMsg;
       memset(&txMsg, 0, sizeof(txMsg));
       txMsg.identifier = canId;
@@ -1329,26 +1346,28 @@ void handleParsedCommand(uint8_t cmd, uint16_t len,
         Serial.printf("[CAN-TX]\nRESULT=FAILED: 0x%X\n", tx_err);
       }
 
-      // 4. Get raw TWAI state AFTER transmission
+      // 5. Get raw TWAI state AFTER transmission
       twai_status_info_t s_after;
       esp_err_t stat_after = twai_get_status_info(&s_after);
+      bool driverInstalledAfter = (stat_after == ESP_OK);
+      bool isBusOffAfter = (stat_after == ESP_OK && s_after.state == TWAI_STATE_BUS_OFF);
 
-      const char* stateStrAfter = (stat_after != ESP_OK) ? "UNINITIALIZED" :
+      const char* stateStrAfter = (!driverInstalledAfter) ? "UNINITIALIZED" :
         (s_after.state == TWAI_STATE_STOPPED) ? "STOPPED" :
         (s_after.state == TWAI_STATE_RUNNING) ? "RUNNING" :
         (s_after.state == TWAI_STATE_BUS_OFF) ? "BUS-OFF" : "RECOVERING";
 
       Serial.printf("[CAN-STATE-AFTER]\n");
       Serial.printf("STATE=%s\n", stateStrAfter);
-      Serial.printf("TX_ERR=%u\n", (stat_after == ESP_OK) ? s_after.tx_error_counter : 0);
-      Serial.printf("RX_ERR=%u\n", (stat_after == ESP_OK) ? s_after.rx_error_counter : 0);
-      Serial.printf("BUS_ERR=%u\n", (stat_after == ESP_OK) ? s_after.bus_error_count : 0);
-      Serial.printf("BUS_OFF=%s\n", (stat_after == ESP_OK && s_after.state == TWAI_STATE_BUS_OFF) ? "YES" : "NO");
+      Serial.printf("TX_ERR=%u\n", driverInstalledAfter ? s_after.tx_error_counter : 0);
+      Serial.printf("RX_ERR=%u\n", driverInstalledAfter ? s_after.rx_error_counter : 0);
+      Serial.printf("BUS_ERR=%u\n", driverInstalledAfter ? s_after.bus_error_count : 0);
+      Serial.printf("BUS_OFF=%s\n", isBusOffAfter ? "YES" : "NO");
       Serial.printf("========================================\n\n");
 
-      // 5. If post-TX state is BUS-OFF, reset immediately for next command
-      if (stat_after == ESP_OK && s_after.state == TWAI_STATE_BUS_OFF) {
-        Serial.println("[CAN-BUS-OFF] Post-TX BUS-OFF detected -> Auto resetting TWAI");
+      // 6. If post-TX state is BUS-OFF, reset immediately for next command
+      if (isBusOffAfter) {
+        Serial.println("[CAN-BUS-OFF] Post-TX BUS-OFF detected -> Auto resetting TWAI driver");
         initCAN(currentCanSpeedKbps);
       }
 
@@ -1778,9 +1797,7 @@ bool autoSearchProtocol(const uint8_t* txBytes, size_t txLen,
                         ActiveTransport transport) {
   const uint8_t canProtocols[] = {
     PROTO_CAN_11_500,
-    PROTO_CAN_29_500,
-    PROTO_CAN_11_250,
-    PROTO_CAN_29_250
+    PROTO_CAN_11_250
   };
 
   for (uint8_t i = 0; i < sizeof(canProtocols); i++) {
@@ -1791,60 +1808,7 @@ bool autoSearchProtocol(const uint8_t* txBytes, size_t txLen,
     if (executeCanIsoTpAttempt(txBytes, txLen, canProtocols[i], true, transport)) {
       elmConfig.protocol = PROTO_AUTO;
       elmConfig.activeProtocol = canProtocols[i];
-      elmConfig.isExtended = (canProtocols[i] == PROTO_CAN_29_500 ||
-                              canProtocols[i] == PROTO_CAN_29_250);
-      return true;
-    }
-  }
-
-  klineState.initialized = false;
-  if (initKlineKwpFast() == STATUS_SUCCESS) {
-    uint8_t rxBuf[128];
-    size_t rxLen = 0;
-    uint8_t status = transceiveKlineFrame(txBytes, txLen, rxBuf, rxLen,
-                                          elmConfig.timeoutMs);
-    if (status == STATUS_SUCCESS && rxLen > 0) {
-      elmConfig.protocol = PROTO_AUTO;
-      elmConfig.activeProtocol = PROTO_KWP2000_FAST;
-      elmConfig.protocolResolved = true;
-
-      char chunk[128];
-      size_t pos = 0;
-      for (size_t i = 0; i < rxLen; i++) {
-        int n = sprintf(chunk + pos, "%02X", rxBuf[i]);
-        if (n <= 0) break;
-        pos += n;
-        if (elmConfig.spaces && i < rxLen - 1) { chunk[pos++] = ' '; chunk[pos] = '\0'; }
-        if (pos >= 100) { sendElmResponseChunk(chunk, transport); pos = 0; chunk[0] = '\0'; }
-      }
-      if (pos > 0) sendElmResponseChunk(chunk, transport);
-      sendElmResponse("\r\n>", transport);
-      return true;
-    }
-  }
-
-  klineState.initialized = false;
-  if (initKlineIso9141() == STATUS_SUCCESS) {
-    uint8_t rxBuf[128];
-    size_t rxLen = 0;
-    uint8_t status = transceiveKlineFrame(txBytes, txLen, rxBuf, rxLen,
-                                          elmConfig.timeoutMs);
-    if (status == STATUS_SUCCESS && rxLen > 0) {
-      elmConfig.protocol = PROTO_AUTO;
-      elmConfig.activeProtocol = klineState.activeProtocol;
-      elmConfig.protocolResolved = true;
-
-      char chunk[128];
-      size_t pos = 0;
-      for (size_t i = 0; i < rxLen; i++) {
-        int n = sprintf(chunk + pos, "%02X", rxBuf[i]);
-        if (n <= 0) break;
-        pos += n;
-        if (elmConfig.spaces && i < rxLen - 1) { chunk[pos++] = ' '; chunk[pos] = '\0'; }
-        if (pos >= 100) { sendElmResponseChunk(chunk, transport); pos = 0; chunk[0] = '\0'; }
-      }
-      if (pos > 0) sendElmResponseChunk(chunk, transport);
-      sendElmResponse("\r\n>", transport);
+      elmConfig.isExtended = false;
       return true;
     }
   }
