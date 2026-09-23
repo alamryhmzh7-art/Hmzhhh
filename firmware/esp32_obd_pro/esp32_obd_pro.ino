@@ -296,7 +296,7 @@ void udsRunPreset(uint8_t presetIndex, ActiveTransport transport);
 // Function declarations
 // ============================================================================
 
-void initCAN(uint32_t speedKbps);
+bool initCAN(uint32_t speedKbps);
 void dispatchCanRx();
 void processIsoTpRxFrame(const twai_message_t& rxMsg);
 void executeIsoTpTransaction(const uint8_t* txBytes, size_t txLen, ActiveTransport transport);
@@ -649,10 +649,18 @@ uint8_t transceiveKlineFrame(const uint8_t* txData, size_t txLen,
 // CAN initialization
 // ============================================================================
 
-void initCAN(uint32_t speedKbps) {
+bool initCAN(uint32_t speedKbps) {
   stats.canInitialized = false;
-  twai_stop();
-  twai_driver_uninstall();
+
+  twai_status_info_t s_cur;
+  if (twai_get_status_info(&s_cur) == ESP_OK) {
+    if (s_cur.state == TWAI_STATE_RUNNING) {
+      twai_stop();
+    }
+    twai_driver_uninstall();
+  } else {
+    twai_driver_uninstall();
+  }
 
   twai_general_config_t g_config =
     TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN, TWAI_MODE_NORMAL);
@@ -667,11 +675,23 @@ void initCAN(uint32_t speedKbps) {
 
   twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
-  if (twai_driver_install(&g_config, &t_config, &f_config) != ESP_OK) return;
-  if (twai_start() != ESP_OK) { twai_driver_uninstall(); return; }
+  esp_err_t inst_err = twai_driver_install(&g_config, &t_config, &f_config);
+  if (inst_err != ESP_OK) {
+    Serial.printf("[CAN-INIT]\nRESULT=FAILED (install err 0x%X)\n", inst_err);
+    return false;
+  }
+
+  esp_err_t start_err = twai_start();
+  if (start_err != ESP_OK) {
+    twai_driver_uninstall();
+    Serial.printf("[CAN-INIT]\nRESULT=FAILED (start err 0x%X)\n", start_err);
+    return false;
+  }
 
   stats.canInitialized = true;
   currentCanSpeedKbps = speedKbps;
+  Serial.printf("[CAN-INIT]\nRESULT=SUCCESS\nBITRATE=%uK\n", speedKbps);
+  return true;
 }
 
 // ============================================================================
@@ -915,7 +935,8 @@ void dispatchCanRx() {
       isoTp.errorMsg = "CAN BUS OFF";
       isoTp.active = false;
     }
-    twai_initiate_recovery();
+    Serial.println("[dispatchCanRx] BUS-OFF detected during RX -> Re-initializing TWAI driver");
+    initCAN(currentCanSpeedKbps);
     return;
   }
   if (s_info.state == TWAI_STATE_RECOVERING) {
@@ -1236,37 +1257,6 @@ void handleParsedCommand(uint8_t cmd, uint16_t len,
         break;
       }
 
-      twai_status_info_t s_info;
-      if (twai_get_status_info(&s_info) != ESP_OK) {
-        stats.txErrorCount++;
-        uint8_t e[2] = { CMD_CAN_FRAME, STATUS_CAN_ERROR };
-        sendBinaryPacket(CMD_ERROR_RESP, e, 2, transport);
-        break;
-      }
-      if (s_info.state == TWAI_STATE_BUS_OFF) {
-        stats.canInitialized = false;
-        stats.txErrorCount++;
-        twai_initiate_recovery();
-        uint8_t e[2] = { CMD_CAN_FRAME, STATUS_CAN_ERROR };
-        sendBinaryPacket(CMD_ERROR_RESP, e, 2, transport);
-        break;
-      }
-      if (s_info.state == TWAI_STATE_RECOVERING) {
-        stats.txErrorCount++;
-        uint8_t e[2] = { CMD_CAN_FRAME, STATUS_BUSY };
-        sendBinaryPacket(CMD_ERROR_RESP, e, 2, transport);
-        break;
-      }
-      if (s_info.state == TWAI_STATE_STOPPED) {
-        if (twai_start() != ESP_OK) {
-          stats.txErrorCount++;
-          uint8_t e[2] = { CMD_CAN_FRAME, STATUS_INIT_FAILED };
-          sendBinaryPacket(CMD_ERROR_RESP, e, 2, transport);
-          break;
-        }
-        stats.canInitialized = true;
-      }
-
       uint32_t canId = ((uint32_t)payload[0] << 24) |
                        ((uint32_t)payload[1] << 16) |
                        ((uint32_t)payload[2] << 8)  |
@@ -1275,22 +1265,52 @@ void handleParsedCommand(uint8_t cmd, uint16_t len,
       bool isExtended = (flags & 0x01) != 0;
       bool isRtr = (flags & 0x02) != 0;
 
-      if (isExtended && canId > 0x1FFFFFFF) {
-        uint8_t e[2] = { CMD_CAN_FRAME, STATUS_INIT_FAILED };
-        sendBinaryPacket(CMD_ERROR_RESP, e, 2, transport);
-        break;
-      }
-      if (!isExtended && canId > 0x7FF) {
-        uint8_t e[2] = { CMD_CAN_FRAME, STATUS_INIT_FAILED };
-        sendBinaryPacket(CMD_ERROR_RESP, e, 2, transport);
-        break;
-      }
-      if (flags & 0xFC) {
+      if ((isExtended && canId > 0x1FFFFFFF) || (!isExtended && canId > 0x7FF) || (flags & 0xFC)) {
         uint8_t e[2] = { CMD_CAN_FRAME, STATUS_INIT_FAILED };
         sendBinaryPacket(CMD_ERROR_RESP, e, 2, transport);
         break;
       }
 
+      // 1. Get raw TWAI state BEFORE transmission
+      twai_status_info_t s_before;
+      esp_err_t stat_before = twai_get_status_info(&s_before);
+
+      const char* stateStrBefore = (stat_before != ESP_OK) ? "UNINITIALIZED" :
+        (s_before.state == TWAI_STATE_STOPPED) ? "STOPPED" :
+        (s_before.state == TWAI_STATE_RUNNING) ? "RUNNING" :
+        (s_before.state == TWAI_STATE_BUS_OFF) ? "BUS-OFF" : "RECOVERING";
+
+      Serial.printf("\n========================================\n");
+      Serial.printf("[CAN-STATE-BEFORE]\n");
+      Serial.printf("PROTOCOL=0x%02X\n", elmConfig.activeProtocol);
+      Serial.printf("BITRATE=%uK\n", currentCanSpeedKbps);
+      Serial.printf("STATE=%s\n", stateStrBefore);
+      Serial.printf("TX_ERR=%u\n", (stat_before == ESP_OK) ? s_before.tx_error_counter : 0);
+      Serial.printf("RX_ERR=%u\n", (stat_before == ESP_OK) ? s_before.rx_error_counter : 0);
+      Serial.printf("BUS_ERR=%u\n", (stat_before == ESP_OK) ? s_before.bus_error_count : 0);
+      Serial.printf("BUS_OFF=%s\n", (stat_before == ESP_OK && s_before.state == TWAI_STATE_BUS_OFF) ? "YES" : "NO");
+
+      // 2. Real Hardware Recovery: If BUS-OFF or RECOVERING or UNINITIALIZED -> Re-initialize CAN driver
+      if (stat_before != ESP_OK || s_before.state == TWAI_STATE_BUS_OFF || s_before.state == TWAI_STATE_RECOVERING) {
+        Serial.println("[CAN-INIT] BUS-OFF / RECOVERING / UNINITIALIZED detected -> Forcing TWAI reset & reinstall");
+        bool initOk = initCAN(currentCanSpeedKbps);
+        if (!initOk) {
+          stats.txErrorCount++;
+          uint8_t e[2] = { CMD_CAN_FRAME, STATUS_INIT_FAILED };
+          sendBinaryPacket(CMD_ERROR_RESP, e, 2, transport);
+          break;
+        }
+      } else if (s_before.state == TWAI_STATE_STOPPED) {
+        if (twai_start() != ESP_OK) {
+          initCAN(currentCanSpeedKbps);
+        } else {
+          Serial.println("[CAN-INIT]\nRESULT=SUCCESS");
+        }
+      } else {
+        Serial.println("[CAN-INIT]\nRESULT=SUCCESS");
+      }
+
+      // 3. Transmit Frame
       twai_message_t txMsg;
       memset(&txMsg, 0, sizeof(txMsg));
       txMsg.identifier = canId;
@@ -1299,16 +1319,40 @@ void handleParsedCommand(uint8_t cmd, uint16_t len,
       txMsg.data_length_code = dlc;
       for (uint8_t b = 0; b < dlc; b++) txMsg.data[b] = payload[6 + b];
 
-      esp_err_t err = twai_transmit(&txMsg, pdMS_TO_TICKS(50));
-      if (err == ESP_OK) {
+      esp_err_t tx_err = twai_transmit(&txMsg, pdMS_TO_TICKS(100));
+
+      if (tx_err == ESP_OK) {
         stats.messagesSent++;
+        Serial.println("[CAN-TX]\nRESULT=SUCCESS");
       } else {
         stats.txErrorCount++;
-        if (twai_get_status_info(&s_info) == ESP_OK &&
-            s_info.state == TWAI_STATE_BUS_OFF) {
-          stats.canInitialized = false;
-          twai_initiate_recovery();
-        }
+        Serial.printf("[CAN-TX]\nRESULT=FAILED: 0x%X\n", tx_err);
+      }
+
+      // 4. Get raw TWAI state AFTER transmission
+      twai_status_info_t s_after;
+      esp_err_t stat_after = twai_get_status_info(&s_after);
+
+      const char* stateStrAfter = (stat_after != ESP_OK) ? "UNINITIALIZED" :
+        (s_after.state == TWAI_STATE_STOPPED) ? "STOPPED" :
+        (s_after.state == TWAI_STATE_RUNNING) ? "RUNNING" :
+        (s_after.state == TWAI_STATE_BUS_OFF) ? "BUS-OFF" : "RECOVERING";
+
+      Serial.printf("[CAN-STATE-AFTER]\n");
+      Serial.printf("STATE=%s\n", stateStrAfter);
+      Serial.printf("TX_ERR=%u\n", (stat_after == ESP_OK) ? s_after.tx_error_counter : 0);
+      Serial.printf("RX_ERR=%u\n", (stat_after == ESP_OK) ? s_after.rx_error_counter : 0);
+      Serial.printf("BUS_ERR=%u\n", (stat_after == ESP_OK) ? s_after.bus_error_count : 0);
+      Serial.printf("BUS_OFF=%s\n", (stat_after == ESP_OK && s_after.state == TWAI_STATE_BUS_OFF) ? "YES" : "NO");
+      Serial.printf("========================================\n\n");
+
+      // 5. If post-TX state is BUS-OFF, reset immediately for next command
+      if (stat_after == ESP_OK && s_after.state == TWAI_STATE_BUS_OFF) {
+        Serial.println("[CAN-BUS-OFF] Post-TX BUS-OFF detected -> Auto resetting TWAI");
+        initCAN(currentCanSpeedKbps);
+      }
+
+      if (tx_err != ESP_OK) {
         uint8_t e[2] = { CMD_CAN_FRAME, STATUS_CAN_ERROR };
         sendBinaryPacket(CMD_ERROR_RESP, e, 2, transport);
       }
@@ -1339,19 +1383,24 @@ void handleParsedCommand(uint8_t cmd, uint16_t len,
       elmConfig.protocol = protoId;
       elmConfig.protocolResolved = false;
 
+      Serial.printf("\n[CMD_CONFIG_PROTOCOL] Re-configuring CAN to Protocol ID 0x%02X...\n", protoId);
+
       if (protoId == PROTO_CAN_11_500 || protoId == PROTO_CAN_29_500) {
-        initCAN(500);
         elmConfig.isExtended = (protoId == PROTO_CAN_29_500);
         elmConfig.activeProtocol = protoId;
+        initCAN(500);
       } else if (protoId == PROTO_CAN_11_250 || protoId == PROTO_CAN_29_250) {
-        initCAN(250);
         elmConfig.isExtended = (protoId == PROTO_CAN_29_250);
         elmConfig.activeProtocol = protoId;
+        initCAN(250);
       } else if (protoId == PROTO_KWP2000_FAST) {
+        elmConfig.activeProtocol = protoId;
         initKlineKwpFast();
       } else if (protoId == PROTO_ISO9141_SLOW) {
+        elmConfig.activeProtocol = protoId;
         initKlineIso9141();
       } else if (protoId == PROTO_KWP2000_SLOW) {
+        elmConfig.activeProtocol = protoId;
         initKlineKwpSlow();
       }
       break;
